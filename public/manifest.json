@@ -1,0 +1,9 @@
+{
+  "name": "Bancas TCC Psicologia",
+  "short_name": "Bancas TCC",
+  "description": "Plataforma de gestão e acompanhamento de bancas de TCC do curso de Psicologia.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#4f46e5"
+}
