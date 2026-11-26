@@ -1,61 +1,136 @@
-import React, { useState } from "react";
-import { Link } from "react-router-dom";
-import { supabase } from "@/lib/supabase";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Lock, Loader2 } from "lucide-react";
-import AuthLayout from "@/components/AuthLayout";
+import { useState, useEffect } from 'react';
+import { useNavigate, Link } from 'react-router-dom';
+import { supabase } from '@/lib/supabase';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Button } from '@/components/ui/button';
+import { useToast } from '@/components/ui/use-toast';
+import { KeyRound, CheckCircle } from 'lucide-react';
 
 export default function ResetPassword() {
-  const [newPassword, setNewPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [error, setError] = useState("");
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [done, setDone] = useState(false);
+  const [sessionReady, setSessionReady] = useState(false);
+  const navigate = useNavigate();
+  const { toast } = useToast();
 
-  const handleSubmit = async (e) => {
+  useEffect(() => {
+    const { data: authListener } = supabase.auth.onAuthStateChange((event) => {
+      if (event === 'PASSWORD_RECOVERY' || event === 'SIGNED_IN') {
+        setSessionReady(true);
+      }
+    });
+
+    supabase.auth.getSession().then(({ data }) => {
+      if (data.session) setSessionReady(true);
+    });
+
+    return () => {
+      authListener.subscription.unsubscribe();
+    };
+  }, []);
+
+  async function handleSubmit(e) {
     e.preventDefault();
-    setError("");
-    if (newPassword !== confirmPassword) {
-      setError("As senhas não coincidem");
+
+    if (password.length < 6) {
+      toast({
+        title: 'Senha muito curta',
+        description: 'A nova senha deve ter pelo menos 6 caracteres.',
+        variant: 'destructive',
+      });
       return;
     }
+
+    if (password !== confirmPassword) {
+      toast({
+        title: 'Senhas diferentes',
+        description: 'A confirmação deve ser igual à nova senha.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
     setLoading(true);
     try {
-      const { error: resetErr } = await supabase.auth.updateUser({ password: newPassword });
-      if (resetErr) throw resetErr;
-      window.location.href = "/login";
+      const { error } = await supabase.auth.updateUser({ password });
+      if (error) throw error;
+
+      setDone(true);
+      setTimeout(() => navigate('/login'), 2500);
     } catch (err) {
-      setError(err.message || "Falha ao redefinir a senha");
+      toast({
+        title: 'Erro ao atualizar senha',
+        description: err.message,
+        variant: 'destructive',
+      });
     } finally {
       setLoading(false);
     }
-  };
+  }
 
   return (
-    <AuthLayout icon={Lock} title="Nova senha" subtitle="Digite sua nova senha abaixo">
-      {error && <div className="mb-4 p-3 rounded-lg bg-destructive/10 text-destructive text-sm">{error}</div>}
-      <form onSubmit={handleSubmit} className="space-y-4">
-        <div className="space-y-2">
-          <Label htmlFor="password">Nova Senha</Label>
-          <div className="relative">
-            <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-            <Input id="password" type="password" autoComplete="new-password" autoFocus placeholder="••••••••"
-              value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="pl-10 h-12" required />
+    <div className="min-h-screen flex items-center justify-center bg-slate-50 px-4">
+      <div className="max-w-md w-full bg-white rounded-2xl shadow-sm border border-slate-200 p-8">
+        {done ? (
+          <div className="text-center space-y-4">
+            <div className="w-14 h-14 rounded-full bg-green-100 flex items-center justify-center mx-auto">
+              <CheckCircle className="w-7 h-7 text-green-600" />
+            </div>
+            <h2 className="text-xl font-bold text-slate-900">Senha alterada!</h2>
+            <p className="text-sm text-slate-600">
+              Sua nova senha foi salva com sucesso. Redirecionando para o login...
+            </p>
+            <Link to="/login">
+              <Button className="w-full">Ir para o Login</Button>
+            </Link>
           </div>
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="confirm">Confirmar Senha</Label>
-          <div className="relative">
-            <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-            <Input id="confirm" type="password" autoComplete="new-password" placeholder="••••••••"
-              value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="pl-10 h-12" required />
-          </div>
-        </div>
-        <Button type="submit" className="w-full h-12 font-medium" disabled={loading}>
-          {loading ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" />Redefinindo...</> : "Salvar nova senha"}
-        </Button>
-      </form>
-    </AuthLayout>
+        ) : (
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="w-11 h-11 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
+                <KeyRound className="w-5 h-5" />
+              </div>
+              <div>
+                <h1 className="text-xl font-bold text-slate-900">Nova Senha</h1>
+                <p className="text-xs text-slate-500">
+                  {sessionReady
+                    ? 'Digite sua nova senha de acesso'
+                    : 'Abra este link diretamente pelo e-mail de recuperação'}
+                </p>
+              </div>
+            </div>
+
+            <div>
+              <Label>Nova senha *</Label>
+              <Input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="Mínimo 6 caracteres"
+                required
+              />
+            </div>
+
+            <div>
+              <Label>Confirmar nova senha *</Label>
+              <Input
+                type="password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="Repita a nova senha"
+                required
+              />
+            </div>
+
+            <Button type="submit" disabled={loading} className="w-full">
+              {loading ? 'Salvando...' : 'Salvar Nova Senha'}
+            </Button>
+          </form>
+        )}
+      </div>
+    </div>
   );
 }

@@ -8,7 +8,17 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import ProfessorSelector from '@/components/ProfessorSelector';
 import StatusBadge from '@/components/public/StatusBadge';
-import { Plus, Pencil, Trash2, Upload, QrCode, Download, X } from 'lucide-react';
+import {
+  Plus,
+  Pencil,
+  Trash2,
+  Upload,
+  UserPlus,
+  QrCode,
+  Download,
+  X,
+  CheckCircle2,
+} from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
 
 const emptyForm = {
@@ -25,6 +35,13 @@ const emptyForm = {
   avaliador2_externo_email: '',
   status: 'pendente',
   vagas_espectadores: 30,
+};
+
+const emptyAlunoForm = {
+  codigo_aluno: '',
+  nome_completo: '',
+  orientador_nome: '',
+  titulacao: '',
 };
 
 function normalizarChave(str) {
@@ -50,9 +67,15 @@ export default function AdminBancas() {
   const [totalPreCadastro, setTotalPreCadastro] = useState(0);
   const [loading, setLoading] = useState(true);
   const [importando, setImportando] = useState(false);
+
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [editId, setEditId] = useState(null);
+
+  const [showAlunoModal, setShowAlunoModal] = useState(false);
+  const [alunoForm, setAlunoForm] = useState(emptyAlunoForm);
+  const [salvandoAluno, setSalvandoAluno] = useState(false);
+
   const [qrBanca, setQrBanca] = useState(null);
   const fileInputRef = useRef(null);
   const { toast } = useToast();
@@ -63,7 +86,11 @@ export default function AdminBancas() {
         supabase.from('bancas').select('*').order('created_at', { ascending: false }),
         supabase.from('horarios').select('*').eq('ativo', true).order('data', { ascending: true }),
         supabase.from('salas').select('*').eq('ativa', true).order('nome', { ascending: true }),
-        supabase.from('professores').select('id, nome').eq('ativo', true),
+        supabase
+          .from('professores')
+          .select('id, nome, user_id')
+          .eq('ativo', true)
+          .order('nome', { ascending: true }),
         supabase.from('alunos_precadastro').select('id', { count: 'exact', head: true }),
       ]);
       setBancas(bRes.data || []);
@@ -84,6 +111,77 @@ export default function AdminBancas() {
 
   function update(field, value) {
     setForm((f) => ({ ...f, [field]: value }));
+  }
+
+  async function handleAprovarBanca(banca) {
+    try {
+      const { error } = await supabase
+        .from('bancas')
+        .update({ status: 'aprovada' })
+        .eq('id', banca.id);
+
+      if (error) throw error;
+
+      toast({
+        title: 'TCC Aprovado!',
+        description: 'Esta banca já está liberada para inscrição de espectadores.',
+      });
+      load();
+    } catch (err) {
+      toast({
+        title: 'Erro ao aprovar TCC',
+        description: err.message,
+        variant: 'destructive',
+      });
+    }
+  }
+
+  async function handleSalvarAlunoAvulso(e) {
+    e.preventDefault();
+    const codigo = alunoForm.codigo_aluno.trim();
+    const nome = alunoForm.nome_completo.trim();
+    const orientador = alunoForm.orientador_nome.trim();
+    const titulacao = alunoForm.titulacao.trim();
+
+    if (!codigo || !nome || !orientador) {
+      toast({
+        title: 'Campos obrigatórios',
+        description: 'Preencha código do aluno, nome completo e orientador.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    setSalvandoAluno(true);
+    try {
+      const { error } = await supabase.from('alunos_precadastro').upsert(
+        {
+          codigo_aluno: codigo,
+          nome_completo: nome,
+          orientador_nome: orientador,
+          titulacao,
+        },
+        { onConflict: 'codigo_aluno' }
+      );
+
+      if (error) throw error;
+
+      toast({
+        title: 'Aluno adicionado!',
+        description: `${nome} (${codigo}) salvo no pré-cadastro sem alterar os registros existentes.`,
+      });
+      setAlunoForm(emptyAlunoForm);
+      setShowAlunoModal(false);
+      load();
+    } catch (err) {
+      toast({
+        title: 'Erro ao adicionar aluno',
+        description: err.message,
+        variant: 'destructive',
+      });
+    } finally {
+      setSalvandoAluno(false);
+    }
   }
 
   async function handleImportarExcel(e) {
@@ -148,7 +246,6 @@ export default function AdminBancas() {
         );
       }
 
-      // Remove duplicados por codigo_aluno dentro da mesma planilha para evitar erro no upsert
       const unicosPorCodigo = Array.from(
         new Map(registros.map((item) => [item.codigo_aluno.toLowerCase(), item])).values()
       );
@@ -161,7 +258,7 @@ export default function AdminBancas() {
 
       toast({
         title: 'Planilha importada!',
-        description: `${unicosPorCodigo.length} aluno(s) sincronizado(s) no pré-cadastro.`,
+        description: `${unicosPorCodigo.length} aluno(s) sincronizado(s) sem apagar os anteriores.`,
       });
       load();
     } catch (err) {
@@ -186,7 +283,12 @@ export default function AdminBancas() {
       const avaliador2CursoObj = professores.find((p) => p.id === form.avaliador2_id);
 
       const isExterno = form.avaliador2_tipo === 'externo';
-      if (isExterno && (!form.avaliador2_externo_titulacao.trim() || !form.avaliador2_externo_nome.trim() || !form.avaliador2_externo_email.trim())) {
+      if (
+        isExterno &&
+        (!form.avaliador2_externo_titulacao.trim() ||
+          !form.avaliador2_externo_nome.trim() ||
+          !form.avaliador2_externo_email.trim())
+      ) {
         throw new Error('Preencha titulação, nome completo e e-mail do avaliador externo.');
       }
 
@@ -205,7 +307,7 @@ export default function AdminBancas() {
         avaliador1_id: form.avaliador1_id || null,
         avaliador1_nome: avaliador1Obj?.nome || '',
         avaliador2_tipo: isExterno ? 'externo' : 'curso',
-        avaliador2_id: isExterno ? null : (form.avaliador2_id || null),
+        avaliador2_id: isExterno ? null : form.avaliador2_id || null,
         avaliador2_nome: avaliador2Nome,
         avaliador2_externo_titulacao: isExterno ? form.avaliador2_externo_titulacao.trim() : null,
         avaliador2_externo_nome: isExterno ? form.avaliador2_externo_nome.trim() : null,
@@ -213,7 +315,8 @@ export default function AdminBancas() {
         status: form.status,
         vagas_espectadores: parseInt(form.vagas_espectadores, 10) || 30,
         horario_descricao: horarioObj
-          ? (horarioObj.descricao || `${horarioObj.data} • ${horarioObj.hora_inicio?.slice(0, 5)} às ${horarioObj.hora_fim?.slice(0, 5)}`)
+          ? horarioObj.descricao ||
+            `${horarioObj.data} • ${horarioObj.hora_inicio?.slice(0, 5)} às ${horarioObj.hora_fim?.slice(0, 5)}`
           : '',
         horario_data: horarioObj ? horarioObj.data : '',
         sala_nome: salaObj ? salaObj.nome : '',
@@ -257,14 +360,17 @@ export default function AdminBancas() {
   }
 
   const qrUrl = qrBanca ? `${window.location.origin}/inscricao/espectador?banca=${qrBanca.id}` : '';
-  const statusOptions = ['pendente', 'agendada', 'realizada', 'cancelada'];
+  const statusOptions = ['pendente', 'aprovada', 'agendada', 'realizada', 'cancelada'];
 
   return (
     <div>
       <div className="flex flex-wrap justify-between items-center gap-3 mb-6">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Bancas</h1>
-          <p className="text-xs text-slate-500">{totalPreCadastro} aluno(s) no pré-cadastro</p>
+          <p className="text-xs text-slate-500">
+            {totalPreCadastro} aluno(s) no pré-cadastro • Aprove os TCCs para liberá-los aos
+            espectadores
+          </p>
         </div>
         <div className="flex flex-wrap gap-2">
           <input
@@ -274,6 +380,17 @@ export default function AdminBancas() {
             onChange={handleImportarExcel}
             className="hidden"
           />
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => {
+              setAlunoForm(emptyAlunoForm);
+              setShowAlunoModal(true);
+            }}
+          >
+            <UserPlus className="w-4 h-4 mr-2" />
+            Adicionar Aluno
+          </Button>
           <Button
             type="button"
             variant="outline"
@@ -298,7 +415,9 @@ export default function AdminBancas() {
 
       {showForm && (
         <div className="bg-white rounded-xl border border-slate-200 p-6 mb-6">
-          <h2 className="font-semibold text-slate-900 mb-4">{editId ? 'Editar Banca' : 'Nova Banca'}</h2>
+          <h2 className="font-semibold text-slate-900 mb-4">
+            {editId ? 'Editar Banca' : 'Nova Banca'}
+          </h2>
           <form onSubmit={handleSave} className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="sm:col-span-2">
               <Label>Título do TCC *</Label>
@@ -328,7 +447,8 @@ export default function AdminBancas() {
                 <option value="">Selecionar...</option>
                 {horarios.map((h) => (
                   <option key={h.id} value={h.id}>
-                    {h.descricao || `${h.data} • ${h.hora_inicio?.slice(0, 5)} às ${h.hora_fim?.slice(0, 5)}`}
+                    {h.descricao ||
+                      `${h.data} • ${h.hora_inicio?.slice(0, 5)} às ${h.hora_fim?.slice(0, 5)}`}
                   </option>
                 ))}
               </select>
@@ -463,12 +583,18 @@ export default function AdminBancas() {
           {bancas.map((b) => (
             <div
               key={b.id}
-              className="bg-white rounded-xl border border-slate-200 p-5 flex justify-between items-start gap-4"
+              className="bg-white rounded-xl border border-slate-200 p-5 flex flex-wrap justify-between items-start gap-4"
             >
-              <div className="flex-1">
-                <div className="flex items-center gap-3 mb-1">
+              <div className="flex-1 min-w-[240px]">
+                <div className="flex flex-wrap items-center gap-2 mb-1">
                   <h3 className="font-semibold text-slate-900">{b.titulo_tcc}</h3>
-                  <StatusBadge status={b.status} />
+                  {b.status === 'aprovada' ? (
+                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700">
+                      <CheckCircle2 className="w-3.5 h-3.5" /> Aprovada
+                    </span>
+                  ) : (
+                    <StatusBadge status={b.status} />
+                  )}
                 </div>
                 <p className="text-sm text-slate-600">
                   {b.apresentador_nome} {b.sala_nome ? `• ${b.sala_nome}` : ''}
@@ -479,7 +605,19 @@ export default function AdminBancas() {
                   {b.avaliador2_nome ? ` • Avaliador 2: ${b.avaliador2_nome}` : ''}
                 </p>
               </div>
-              <div className="flex gap-1">
+
+              <div className="flex items-center gap-1.5">
+                {b.status === 'pendente' && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() => handleAprovarBanca(b)}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white gap-1.5 mr-1"
+                  >
+                    <CheckCircle2 className="w-4 h-4" /> Aprovar TCC
+                  </Button>
+                )}
+
                 <button
                   type="button"
                   onClick={() => setQrBanca(b)}
@@ -526,6 +664,98 @@ export default function AdminBancas() {
         </div>
       )}
 
+      {/* Modal: Adicionar Aluno Avulso ao Pré-cadastro */}
+      {showAlunoModal && (
+        <div
+          className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
+          onClick={() => setShowAlunoModal(false)}
+        >
+          <div
+            className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex justify-between items-center">
+              <h3 className="font-bold text-slate-900">Adicionar Aluno ao Pré-cadastro</h3>
+              <button
+                type="button"
+                onClick={() => setShowAlunoModal(false)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <p className="text-xs text-slate-500">
+              Adiciona este aluno sem substituir ou apagar os alunos já importados via Excel.
+            </p>
+            <form onSubmit={handleSalvarAlunoAvulso} className="space-y-3">
+              <div>
+                <Label>Código do Aluno *</Label>
+                <Input
+                  value={alunoForm.codigo_aluno}
+                  onChange={(e) =>
+                    setAlunoForm((f) => ({ ...f, codigo_aluno: e.target.value }))
+                  }
+                  placeholder="Ex: 123456"
+                  required
+                />
+              </div>
+              <div>
+                <Label>Nome Completo *</Label>
+                <Input
+                  value={alunoForm.nome_completo}
+                  onChange={(e) =>
+                    setAlunoForm((f) => ({ ...f, nome_completo: e.target.value }))
+                  }
+                  placeholder="Nome completo do aluno"
+                  required
+                />
+              </div>
+              <div>
+                <Label>Professor(a) Orientador(a) *</Label>
+                <select
+                  value={alunoForm.orientador_nome}
+                  onChange={(e) =>
+                    setAlunoForm((f) => ({ ...f, orientador_nome: e.target.value }))
+                  }
+                  required
+                  className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                >
+                  <option value="">Selecione o orientador...</option>
+                  {professores.map((p) => (
+                    <option key={p.id} value={p.nome}>
+                      {p.nome}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <Label>Titulação (opcional)</Label>
+                <Input
+                  value={alunoForm.titulacao}
+                  onChange={(e) =>
+                    setAlunoForm((f) => ({ ...f, titulacao: e.target.value }))
+                  }
+                  placeholder="Ex: Mestrado, Doutorado..."
+                />
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setShowAlunoModal(false)}
+                >
+                  Cancelar
+                </Button>
+                <Button type="submit" disabled={salvandoAluno}>
+                  {salvandoAluno ? 'Salvando...' : 'Salvar Aluno'}
+                </Button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: QR Code da Banca */}
       {qrBanca && (
         <div
           className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
