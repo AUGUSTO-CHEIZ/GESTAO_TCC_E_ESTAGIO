@@ -108,22 +108,21 @@ export default function ProfessorDashboard() {
       });
       setHorariosChamada((prev) => ({ ...horariosIniciais, ...prev }));
 
+      const inscMap = {};
       if (bancasList.length > 0) {
         const ids = bancasList.map((b) => b.id);
         const { data: todasInscs } = await supabase
           .from('inscricoes')
           .select('*')
           .in('banca_id', ids)
+          .neq('tipo', 'apresentador')
           .order('created_at', { ascending: true });
 
-        const inscMap = {};
-        bancasList.forEach((b) => {
-          inscMap[b.id] = (todasInscs || []).filter((i) => i.banca_id === b.id);
-        });
-        setInscricoes(inscMap);
-      } else {
-        setInscricoes({});
+        for (const banca of bancasList) {
+          inscMap[banca.id] = (todasInscs || []).filter((i) => i.banca_id === banca.id);
+        }
       }
+      setInscricoes(inscMap);
     } catch (e) {
       setError(e.message || 'Erro ao carregar dados do professor');
     } finally {
@@ -142,7 +141,6 @@ export default function ProfessorDashboard() {
     const etapaAtual = banca.chamada1_concluida ? 2 : 1;
     const novoValor = !inscricao.presente;
 
-    // Atualiza na tela imediatamente (sem esperar rede)
     setInscricoes((prev) => ({
       ...prev,
       [banca.id]: (prev[banca.id] || []).map((item) =>
@@ -168,7 +166,6 @@ export default function ProfessorDashboard() {
         throw new Error(res.data.error);
       }
     } catch (e) {
-      // Reverte somente se falhar no banco
       setInscricoes((prev) => ({
         ...prev,
         [banca.id]: (prev[banca.id] || []).map((item) =>

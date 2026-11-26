@@ -37,17 +37,29 @@ export default function AreaProfessorLogin() {
       const res = await verificarPrimeiroAcessoProfessor(emailLimpo);
       if (res.data?.error) throw new Error(res.data.error);
 
-      if (!res.data?.cadastrado) {
+      const prof = res.data?.professor || null;
+      const cadastrado = Boolean(res.data?.cadastrado || res.data?.success || prof);
+      const inativo = Boolean(res.data?.inativo || prof?.ativo === false);
+
+      if (!cadastrado) {
         setErro('E-mail não encontrado no pré-cadastro de professores. Solicite à coordenação o cadastro do seu e-mail.');
         return;
       }
-      if (res.data?.inativo) {
+      if (inativo) {
         setErro('Seu cadastro de professor está inativo. Entre em contato com a coordenação.');
         return;
       }
 
-      setNomeProfessor(res.data.nome || 'Professor(a)');
-      setEtapa(res.data.ja_possui_senha ? 'login' : 'primeiro_acesso');
+      const nome = res.data?.nome || prof?.nome || 'Professor(a)';
+      const jaPossuiSenha =
+        typeof res.data?.ja_possui_senha === 'boolean'
+          ? res.data.ja_possui_senha
+          : typeof res.data?.ja_cadastrado === 'boolean'
+          ? res.data.ja_cadastrado
+          : Boolean(prof?.user_id);
+
+      setNomeProfessor(nome);
+      setEtapa(jaPossuiSenha ? 'login' : 'primeiro_acesso');
     } catch (err) {
       setErro(err.message || 'Erro ao verificar e-mail.');
     } finally {
@@ -77,7 +89,17 @@ export default function AreaProfessorLogin() {
           data: { full_name: nomeProfessor, role: 'professor' },
         },
       });
-      if (error) throw error;
+
+      if (error) {
+        if (error.message?.toLowerCase().includes('already registered')) {
+          setEtapa('login');
+          setPassword('');
+          setConfirmPassword('');
+          setErro('Este e-mail já possui senha cadastrada. Digite sua senha para entrar.');
+          return;
+        }
+        throw error;
+      }
 
       if (!data.session) {
         const { error: loginErr } = await supabase.auth.signInWithPassword({
