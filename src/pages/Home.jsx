@@ -18,6 +18,8 @@ const STATUS_BLOQUEADOS = [
   'encerrado',
 ];
 
+const STATUS_APROVADOS = ['agendada'];
+
 const DIAS_SEMANA = [
   'Domingo',
   'Segunda-feira',
@@ -92,9 +94,10 @@ export default function Home() {
 
   const bancasSelecionaveis = todasBancas.filter((b) => {
     const statusNorm = String(b.status || '').trim().toLowerCase();
+    const aprovada = STATUS_APROVADOS.includes(statusNorm);
     const bloqueado = STATUS_BLOQUEADOS.includes(statusNorm);
     const vagasRestantes = Number(b.vagas_restantes ?? 0);
-    return !bloqueado && vagasRestantes > 0;
+    return aprovada && !bloqueado && vagasRestantes > 0;
   });
 
   const bancasPorHorario = horarios
@@ -171,7 +174,7 @@ export default function Home() {
             <p className="text-slate-400">Nenhuma banca disponível para inscrição no momento.</p>
           </div>
         ) : (
-          <div className="space-y-8">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
             {bancasPorHorario.map((horario) => (
               <div key={horario.id} className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
                 <div className="bg-slate-50 px-6 py-4 border-b border-slate-200">
@@ -191,7 +194,7 @@ export default function Home() {
                     </div>
                   </div>
                 </div>
-                <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="p-6 grid grid-cols-1 gap-4">
                   {horario.bancas.map((banca) => (
                     <div key={banca.id} className="border border-slate-200 rounded-xl p-5 hover:shadow-md transition">
                       <div className="flex justify-between items-start mb-3">

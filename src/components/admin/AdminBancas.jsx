@@ -45,6 +45,13 @@ const emptyAlunoForm = {
   titulacao: '',
 };
 
+const STATUS_OPTIONS = [
+  { value: 'pendente', label: 'Pendentes de aprovação' },
+  { value: 'agendada', label: 'Agendada' },
+  { value: 'realizada', label: 'Realizada e aprovada' },
+  { value: 'cancelada', label: 'Cancelada' },
+];
+
 function normalizarChave(str) {
   return String(str || '')
     .normalize('NFD')
@@ -148,14 +155,14 @@ export default function AdminBancas() {
     try {
       const { error } = await supabase
         .from('bancas')
-        .update({ status: 'aprovada' })
+        .update({ status: 'agendada' })
         .eq('id', banca.id);
 
       if (error) throw error;
 
       toast({
-        title: 'TCC Aprovado!',
-        description: 'Esta banca já está liberada para inscrição de espectadores.',
+        title: 'Banca Agendada / Aprovada!',
+        description: 'Esta banca já está liberada para inscrição de espectadores na tela inicial.',
       });
       load();
     } catch (err) {
@@ -391,7 +398,6 @@ export default function AdminBancas() {
   }
 
   const qrUrl = qrBanca ? `${window.location.origin}/inscricao/espectador?banca=${qrBanca.id}` : '';
-  const statusOptions = ['pendente', 'aprovada', 'agendada', 'realizada', 'cancelada'];
 
   return (
     <div>
@@ -577,9 +583,9 @@ export default function AdminBancas() {
                 onChange={(e) => update('status', e.target.value)}
                 className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
               >
-                {statusOptions.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
+                {STATUS_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
                   </option>
                 ))}
               </select>
