@@ -7,6 +7,17 @@ import PublicFooter from '@/components/public/PublicFooter';
 import StatusBadge from '@/components/public/StatusBadge';
 import { Calendar, MapPin, Users, GraduationCap, Clock, ArrowRight } from 'lucide-react';
 
+const STATUS_BLOQUEADOS = [
+  'realizada',
+  'realizado',
+  'cancelada',
+  'cancelado',
+  'pendente',
+  'aguardando',
+  'encerrada',
+  'encerrado',
+];
+
 export default function Home() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -40,9 +51,20 @@ export default function Home() {
 
   const evento = data?.evento;
   const horarios = data?.horarios || [];
-  const bancas = data?.bancas || [];
+  const todasBancas = data?.bancas || [];
+
+  const bancasSelecionaveis = todasBancas.filter((b) => {
+    const statusNorm = String(b.status || '').trim().toLowerCase();
+    const bloqueado = STATUS_BLOQUEADOS.includes(statusNorm);
+    const vagasRestantes = Number(b.vagas_restantes ?? 0);
+    return !bloqueado && vagasRestantes > 0;
+  });
+
   const bancasPorHorario = horarios
-    .map((h) => ({ ...h, bancas: bancas.filter((b) => b.horario_id === h.id) }))
+    .map((h) => ({
+      ...h,
+      bancas: bancasSelecionaveis.filter((b) => b.horario_id === h.id),
+    }))
     .filter((h) => h.bancas.length > 0);
 
   return (
@@ -112,7 +134,7 @@ export default function Home() {
         ) : bancasPorHorario.length === 0 ? (
           <div className="text-center py-20">
             <Calendar className="w-12 h-12 text-slate-300 mx-auto mb-4" />
-            <p className="text-slate-400">Nenhuma banca agendada ainda.</p>
+            <p className="text-slate-400">Nenhuma banca disponível para inscrição no momento.</p>
           </div>
         ) : (
           <div className="space-y-8">
@@ -145,11 +167,9 @@ export default function Home() {
                           {banca.vagas_restantes} vagas restantes
                         </p>
                       </div>
-                      {banca.vagas_restantes > 0 && banca.status !== "realizada" && (
-                        <Link to={`/inscricao/espectador?banca=${banca.id}`} className="mt-4 inline-flex items-center gap-1 text-indigo-600 font-medium text-sm hover:text-indigo-700">
-                          Inscrever-se <ArrowRight className="w-4 h-4" />
-                        </Link>
-                      )}
+                      <Link to={`/inscricao/espectador?banca=${banca.id}`} className="mt-4 inline-flex items-center gap-1 text-indigo-600 font-medium text-sm hover:text-indigo-700">
+                        Inscrever-se <ArrowRight className="w-4 h-4" />
+                      </Link>
                     </div>
                   ))}
                 </div>

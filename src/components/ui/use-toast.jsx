@@ -83,7 +83,7 @@ function useToast() {
       const index = listeners.indexOf(setState);
       if (index > -1) { listeners.splice(index, 1); }
     };
-  }, [state]);
+  }, []);
   return {
     ...state,
     toast,

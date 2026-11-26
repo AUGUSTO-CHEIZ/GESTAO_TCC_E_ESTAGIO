@@ -444,19 +444,27 @@ export async function criarInscricao(body) {
   }
 }
 
-// 4. Consultar Inscrições por E-mail
-export async function consultarInscricao({ email }) {
+// 4. Consultar Inscrições por Código do Aluno ou E-mail
+export async function consultarInscricao({ codigo, email }) {
   try {
-    if (!email) return { data: { error: 'E-mail é obrigatório' } };
+    const termo = String(codigo || email || '').trim();
+    if (!termo) {
+      return { data: { error: 'Informe seu código do aluno ou e-mail.' } };
+    }
 
-    const { data: inscricoes, error } = await supabase
-      .from('inscricoes')
-      .select('*')
-      .ilike('email', email.trim());
+    let query = supabase.from('inscricoes').select('*');
+
+    if (termo.includes('@')) {
+      query = query.ilike('email', termo);
+    } else {
+      query = query.or(`codigo_academico.ilike.${termo},email.ilike.${termo}`);
+    }
+
+    const { data: inscricoes, error } = await query;
 
     if (error) throw error;
     if (!inscricoes || inscricoes.length === 0) {
-      return { data: { error: 'Nenhuma inscrição encontrada para este e-mail.' } };
+      return { data: { error: 'Nenhuma inscrição encontrada para este código ou e-mail.' } };
     }
 
     const enriched = await Promise.all(
@@ -494,19 +502,40 @@ export async function vincularProfessorUsuario() {
     } = await supabase.auth.getUser();
     if (!user) return { data: { error: 'Acesso negado: faça login' } };
 
+    const emailLimpo = String(user.email || '').trim();
+
     const { data: professores, error } = await supabase
       .from('professores')
       .select('*')
-      .ilike('email', user.email);
+      .ilike('email', emailLimpo);
 
-    if (error || !professores || professores.length === 0) {
+    if (error) {
+      return { data: { error: error.message } };
+    }
+
+    if (!professores || professores.length === 0) {
+      const roleMeta = user.user_metadata?.role || '';
+      if (roleMeta === 'admin' || roleMeta === 'organizadora') {
+        return {
+          data: {
+            success: true,
+            professor: {
+              id: user.id,
+              nome: user.user_metadata?.nome || user.user_metadata?.full_name || emailLimpo,
+              email: emailLimpo,
+              ativo: true,
+              user_id: user.id,
+            },
+          },
+        };
+      }
       return {
         data: { error: 'Professor não encontrado no cadastro. Contate a organização do evento.' },
       };
     }
 
     const professor = professores[0];
-    if (!professor.ativo) {
+    if (professor.ativo === false) {
       return {
         data: { error: 'Seu cadastro está inativo. Contate a organização do evento.' },
       };
@@ -914,7 +943,7 @@ export async function verificarEAtualizarSemestre() {
 export async function verificarPrimeiroAcessoProfessor(params) {
   try {
     const emailRaw = typeof params === 'string' ? params : params?.email || '';
-    const email = emailRaw.trim();
+    const email = String(emailRaw).trim();
 
     if (!email) {
       return { data: { error: 'Informe o e-mail institucional.' } };
