@@ -113,7 +113,6 @@ export default function AdminHorarios() {
               return (
                 <div
                   key={iso}
-                  onMouseEnter={() => setDiaFoco(iso)}
                   onClick={() => setDiaFoco(iso)}
                   className={`h-20 p-1.5 rounded-lg border text-left cursor-pointer transition ${
                     selecionado ? 'border-indigo-500 bg-indigo-50/60' : 'border-slate-100 hover:border-indigo-300'
@@ -140,8 +139,7 @@ export default function AdminHorarios() {
 
         <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-3">
           <h4 className="font-semibold text-slate-800 border-b pb-2">
-            {diaFoco ? `Agenda de ${diaFoco.split('-').reverse().join('/')}` : 'Passe o mouse em um dia'}
-          </h4>
+            {diaFoco ? `Agenda de ${diaFoco.split('-').reverse().join('/')}` : 'Clique em um dia no calendário'}          </h4>
           {!diaFoco || horariosDoDia(diaFoco).length === 0 ? (
             <p className="text-sm text-slate-400">Nenhum horário cadastrado neste dia.</p>
           ) : (
