@@ -543,7 +543,14 @@ export async function vincularProfessorUsuario() {
 
     if (!professor.user_id || professor.user_id !== user.id) {
       await supabase.from('professores').update({ user_id: user.id }).eq('id', professor.id);
-      await supabase.from('perfis').update({ role: 'professor' }).eq('id', user.id);
+      const { data: perfil } = await supabase
+        .from('perfis')
+        .select('role')
+        .eq('id', user.id)
+        .maybeSingle();
+      if (perfil?.role !== 'admin' && perfil?.role !== 'organizadora') {
+        await supabase.from('perfis').update({ role: 'professor' }).eq('id', user.id);
+      }
     }
 
     return { data: { success: true, professor: { ...professor, user_id: user.id } } };
@@ -552,7 +559,7 @@ export async function vincularProfessorUsuario() {
   }
 }
 
-// 6. Confirmar Presença (1ª ou 2ª Chamada)
+// 6. Confirmar Presença (1ª ou 2ª Chamada) com fallback e validação de erro
 export async function confirmarPresenca({ inscricao_id, presente, etapa = 1 }) {
   try {
     const {
@@ -573,20 +580,40 @@ export async function confirmarPresenca({ inscricao_id, presente, etapa = 1 }) {
         ? { presente_chamada2: presente, presente }
         : { presente_chamada1: presente, presente };
 
-    await supabase.from('inscricoes').update(updates).eq('id', inscricao_id);
+    let { error: updErr } = await supabase
+      .from('inscricoes')
+      .update(updates)
+      .eq('id', inscricao_id);
 
-    await supabase.from('presencas').upsert({
-      inscricao_id,
-      inscricao_nome: inscricao.nome,
-      inscricao_tipo: inscricao.tipo,
-      banca_id: inscricao.banca_id,
-      banca_titulo: inscricao.banca_titulo,
-      orientador_user_id: inscricao.orientador_user_id,
-      presente,
-      confirmado_por_professor_id: user.id,
-      confirmado_por_nome: user.user_metadata?.full_name || user.email,
-      data_confirmacao: new Date().toISOString(),
-    });
+    // Fallback caso as colunas presente_chamada1/2 ainda não existam na tabela inscricoes
+    if (updErr && /presente_chamada/i.test(updErr.message || '')) {
+      const retry = await supabase
+        .from('inscricoes')
+        .update({ presente })
+        .eq('id', inscricao_id);
+      updErr = retry.error;
+    }
+
+    if (updErr) {
+      return { data: { error: `Não foi possível salvar presença: ${updErr.message}` } };
+    }
+
+    try {
+      await supabase.from('presencas').upsert({
+        inscricao_id,
+        inscricao_nome: inscricao.nome,
+        inscricao_tipo: inscricao.tipo,
+        banca_id: inscricao.banca_id,
+        banca_titulo: inscricao.banca_titulo,
+        orientador_user_id: inscricao.orientador_user_id,
+        presente,
+        confirmado_por_professor_id: user.id,
+        confirmado_por_nome: user.user_metadata?.full_name || user.email,
+        data_confirmacao: new Date().toISOString(),
+      });
+    } catch (_) {
+      // Ignora erro secundário na tabela auxiliar de log
+    }
 
     return { data: { success: true } };
   } catch (error) {
@@ -594,8 +621,12 @@ export async function confirmarPresenca({ inscricao_id, presente, etapa = 1 }) {
   }
 }
 
-// 7. Concluir 1ª Chamada: move ausentes para histórico e libera vagas para 2ª hora
-export async function finalizarPrimeiraChamada({ banca_id, horario_chamada }) {
+// 7. Concluir 1ª Chamada: mantém os presentes e libera vagas SOMENTE pelos ausentes
+export async function finalizarPrimeiraChamada({
+  banca_id,
+  horario_chamada,
+  presentes_ids = null,
+}) {
   try {
     const {
       data: { user },
@@ -605,40 +636,70 @@ export async function finalizarPrimeiraChamada({ banca_id, horario_chamada }) {
     const { data: banca } = await supabase.from('bancas').select('*').eq('id', banca_id).single();
     if (!banca) return { data: { error: 'Banca não encontrada' } };
 
-    const { data: inscricoes } = await supabase
+    const { data: inscricoes, error: listErr } = await supabase
       .from('inscricoes')
       .select('*')
       .eq('banca_id', banca_id);
 
-    const ausentes = (inscricoes || []).filter(
-      (i) => i.tipo !== 'apresentador' && !i.presente_chamada1 && !i.presente
+    if (listErr) throw listErr;
+
+    const espectadores = (inscricoes || []).filter((i) => i.tipo !== 'apresentador');
+    const usarListaTela = Array.isArray(presentes_ids);
+
+    // Garante que todos os marcados como presentes na tela estejam salvos como presente = true no banco
+    if (usarListaTela && presentes_ids.length > 0) {
+      let { error: syncErr } = await supabase
+        .from('inscricoes')
+        .update({ presente: true, presente_chamada1: true })
+        .in('id', presentes_ids);
+
+      if (syncErr && /presente_chamada/i.test(syncErr.message || '')) {
+        const retrySync = await supabase
+          .from('inscricoes')
+          .update({ presente: true })
+          .in('id', presentes_ids);
+        syncErr = retrySync.error;
+      }
+      if (syncErr) throw syncErr;
+    }
+
+    const ausentes = espectadores.filter((i) =>
+      usarListaTela ? !presentes_ids.includes(i.id) : !i.presente_chamada1 && !i.presente
     );
 
     if (ausentes.length > 0) {
-      const historicoRows = ausentes.map((a) => ({
-        banca_id,
-        banca_titulo: banca.titulo_tcc,
-        horario_descricao: banca.horario_descricao || '',
-        horario_data: banca.horario_data || '',
-        nome: a.nome,
-        email: a.email || '',
-        codigo_academico: a.codigo_academico || '',
-        tipo: a.tipo,
-        etapa_falta: '1ª Chamada',
-        registrado_por: user.user_metadata?.full_name || user.email,
-      }));
+      try {
+        const historicoRows = ausentes.map((a) => ({
+          banca_id,
+          banca_titulo: banca.titulo_tcc,
+          horario_descricao: banca.horario_descricao || '',
+          horario_data: banca.horario_data || '',
+          nome: a.nome,
+          email: a.email || '',
+          codigo_academico: a.codigo_academico || '',
+          tipo: a.tipo,
+          etapa_falta: '1ª Chamada',
+          registrado_por: user.user_metadata?.full_name || user.email,
+        }));
+        await supabase.from('inscricoes_ausentes').insert(historicoRows);
+      } catch (_) {
+        // Prossegue com a liberação das vagas mesmo se a tabela de histórico não existir
+      }
 
-      await supabase.from('inscricoes_ausentes').insert(historicoRows);
-      await supabase
+      const { error: delErr } = await supabase
         .from('inscricoes')
         .delete()
         .in(
           'id',
           ausentes.map((a) => a.id)
         );
+
+      if (delErr) {
+        return { data: { error: `Erro ao liberar vagas dos ausentes: ${delErr.message}` } };
+      }
     }
 
-    await supabase
+    const { error: bancaUpdErr } = await supabase
       .from('bancas')
       .update({
         chamada1_concluida: true,
@@ -646,7 +707,20 @@ export async function finalizarPrimeiraChamada({ banca_id, horario_chamada }) {
       })
       .eq('id', banca_id);
 
-    return { data: { success: true, vagas_liberadas: ausentes.length } };
+    if (bancaUpdErr) throw bancaUpdErr;
+
+    const totalVagas = banca.vagas_espectadores || 30;
+    const presentesMantidos = espectadores.length - ausentes.length;
+    const vagasDisponiveis = Math.max(0, totalVagas - presentesMantidos);
+
+    return {
+      data: {
+        success: true,
+        vagas_liberadas: ausentes.length,
+        vagas_disponiveis: vagasDisponiveis,
+        presentes_mantidos: presentesMantidos,
+      },
+    };
   } catch (error) {
     return { data: { error: error.message } };
   }
@@ -692,35 +766,48 @@ export async function adicionarAlunoUltimaHora(body) {
     const { data: banca } = await supabase.from('bancas').select('*').eq('id', banca_id).single();
     if (!banca) return { data: { error: 'Banca não encontrada' } };
 
-    const { data: novaInscricao, error: err } = await supabase
+    let payload = {
+      banca_id,
+      banca_titulo: banca.titulo_tcc,
+      horario_descricao: banca.horario_descricao || '',
+      horario_data: banca.horario_data || '',
+      sala_nome: banca.sala_nome || '',
+      orientador_user_id: banca.orientador_user_id || null,
+      tipo,
+      nome,
+      email: email || '',
+      cpf: cpf || '',
+      codigo_academico: codigo_academico || '',
+      curso: curso || 'Psicologia',
+      semestre: semestre || '',
+      parentesco: parentesco || '',
+      etapa_chamada: banca.chamada1_concluida ? 2 : 1,
+      presente: true,
+      presente_chamada1: !banca.chamada1_concluida,
+      presente_chamada2: true,
+      inclusao_ultima_hora: true,
+      added_by_professor_id: user.id,
+      added_by_professor_nome: user.user_metadata?.full_name || user.email,
+      email_enviado: Boolean(email),
+      email_status: email ? 'confirmado' : 'sem_email',
+    };
+
+    let { data: novaInscricao, error: err } = await supabase
       .from('inscricoes')
-      .insert({
-        banca_id,
-        banca_titulo: banca.titulo_tcc,
-        horario_descricao: banca.horario_descricao || '',
-        horario_data: banca.horario_data || '',
-        sala_nome: banca.sala_nome || '',
-        orientador_user_id: banca.orientador_user_id || null,
-        tipo,
-        nome,
-        email: email || '',
-        cpf: cpf || '',
-        codigo_academico: codigo_academico || '',
-        curso: curso || 'Psicologia',
-        semestre: semestre || '',
-        parentesco: parentesco || '',
-        etapa_chamada: banca.chamada1_concluida ? 2 : 1,
-        presente: true,
-        presente_chamada1: !banca.chamada1_concluida,
-        presente_chamada2: true,
-        inclusao_ultima_hora: true,
-        added_by_professor_id: user.id,
-        added_by_professor_nome: user.user_metadata?.full_name || user.email,
-        email_enviado: Boolean(email),
-        email_status: email ? 'confirmado' : 'sem_email',
-      })
+      .insert(payload)
       .select()
       .single();
+
+    if (err && /presente_chamada/i.test(err.message || '')) {
+      const { presente_chamada1, presente_chamada2, ...payloadSemChamada } = payload;
+      const retry = await supabase
+        .from('inscricoes')
+        .insert(payloadSemChamada)
+        .select()
+        .single();
+      novaInscricao = retry.data;
+      err = retry.error;
+    }
 
     if (err) throw err;
 

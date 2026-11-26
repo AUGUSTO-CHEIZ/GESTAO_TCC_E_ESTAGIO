@@ -5,7 +5,7 @@ import { useAuth } from '@/lib/AuthContext';
 import PublicHeader from '@/components/public/PublicHeader';
 import PublicFooter from '@/components/public/PublicFooter';
 import StatusBadge from '@/components/public/StatusBadge';
-import { Calendar, MapPin, Users, GraduationCap, Clock, ArrowRight } from 'lucide-react';
+import { Calendar, MapPin, Users, GraduationCap, ArrowRight } from 'lucide-react';
 
 const STATUS_BLOQUEADOS = [
   'realizada',
@@ -17,6 +17,43 @@ const STATUS_BLOQUEADOS = [
   'encerrada',
   'encerrado',
 ];
+
+const DIAS_SEMANA = [
+  'Domingo',
+  'Segunda-feira',
+  'Terça-feira',
+  'Quarta-feira',
+  'Quinta-feira',
+  'Sexta-feira',
+  'Sábado',
+];
+
+function formatarDataComDia(rawData) {
+  const str = String(rawData || '').trim();
+  if (!str) return '';
+
+  let dia, mes, ano;
+  if (/^\d{4}-\d{2}-\d{2}/.test(str)) {
+    [ano, mes, dia] = str.slice(0, 10).split('-').map(Number);
+  } else if (/^\d{2}\/\d{2}\/\d{4}/.test(str)) {
+    [dia, mes, ano] = str.slice(0, 10).split('/').map(Number);
+  } else {
+    return str;
+  }
+
+  const dataLocal = new Date(ano, mes - 1, dia);
+  if (Number.isNaN(dataLocal.getTime())) return str;
+
+  const dataFormatada = `${String(dia).padStart(2, '0')}/${String(mes).padStart(2, '0')}/${ano}`;
+  const diaSemana = DIAS_SEMANA[dataLocal.getDay()];
+  return `${dataFormatada} / ${diaSemana}`;
+}
+
+function formatarHoraCurta(rawHora) {
+  const str = String(rawHora || '').trim();
+  if (!str) return '';
+  return str.slice(0, 5);
+}
 
 export default function Home() {
   const [data, setData] = useState(null);
@@ -98,9 +135,6 @@ export default function Home() {
               <Link to="/minha-inscricao" className="px-6 py-3 rounded-xl bg-white/10 backdrop-blur-sm border border-white/30 text-white font-semibold hover:bg-white/20 transition">
                 Minha Inscrição
               </Link>
-              <Link to="/area-professor" className="px-6 py-3 rounded-xl bg-white/10 backdrop-blur-sm border border-white/30 text-white font-semibold hover:bg-white/20 transition">
-                Área do Professor
-              </Link>
             </div>
           </div>
           {evento && (evento.data_inicio || evento.local) && (
@@ -143,11 +177,17 @@ export default function Home() {
                 <div className="bg-slate-50 px-6 py-4 border-b border-slate-200">
                   <div className="flex items-center gap-3">
                     <div className="w-10 h-10 rounded-lg bg-indigo-100 flex items-center justify-center">
-                      <Clock className="w-5 h-5 text-indigo-600" />
+                      <Calendar className="w-5 h-5 text-indigo-600" />
                     </div>
                     <div>
-                      <p className="font-semibold text-slate-900">{horario.descricao || `${horario.data} - ${horario.hora_inicio} às ${horario.hora_fim}`}</p>
-                      <p className="text-sm text-slate-500">{horario.data} • {horario.hora_inicio} às {horario.hora_fim}</p>
+                      <p className="font-semibold text-slate-900">
+                        {formatarDataComDia(horario.data) || horario.descricao}
+                      </p>
+                      <p className="text-sm text-slate-500">
+                        {horario.hora_inicio && horario.hora_fim
+                          ? `${formatarHoraCurta(horario.hora_inicio)} às ${formatarHoraCurta(horario.hora_fim)}`
+                          : horario.descricao}
+                      </p>
                     </div>
                   </div>
                 </div>

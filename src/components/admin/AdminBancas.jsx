@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import * as XLSX from 'xlsx';
 import { QRCodeCanvas } from 'qrcode.react';
 import { supabase } from '@/lib/supabase';
@@ -18,6 +18,7 @@ import {
   Download,
   X,
   CheckCircle2,
+  RefreshCw,
 } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
 
@@ -59,6 +60,15 @@ function limparTexto(val) {
   return s;
 }
 
+function comTimeout(promise, ms = 12000) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Tempo limite excedido ao carregar dados.')), ms)
+    ),
+  ]);
+}
+
 export default function AdminBancas() {
   const [bancas, setBancas] = useState([]);
   const [horarios, setHorarios] = useState([]);
@@ -66,6 +76,7 @@ export default function AdminBancas() {
   const [professores, setProfessores] = useState([]);
   const [totalPreCadastro, setTotalPreCadastro] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [erroCarregamento, setErroCarregamento] = useState('');
   const [importando, setImportando] = useState(false);
 
   const [showForm, setShowForm] = useState(false);
@@ -80,34 +91,54 @@ export default function AdminBancas() {
   const fileInputRef = useRef(null);
   const { toast } = useToast();
 
-  async function load() {
+  const load = useCallback(async (isMountedRef = { current: true }) => {
+    setErroCarregamento('');
+    setLoading(true);
     try {
-      const [bRes, hRes, sRes, pRes, preRes] = await Promise.all([
-        supabase.from('bancas').select('*').order('created_at', { ascending: false }),
-        supabase.from('horarios').select('*').eq('ativo', true).order('data', { ascending: true }),
-        supabase.from('salas').select('*').eq('ativa', true).order('nome', { ascending: true }),
-        supabase
-          .from('professores')
-          .select('id, nome, user_id')
-          .eq('ativo', true)
-          .order('nome', { ascending: true }),
-        supabase.from('alunos_precadastro').select('id', { count: 'exact', head: true }),
-      ]);
+      const [bRes, hRes, sRes, pRes, preRes] = await comTimeout(
+        Promise.all([
+          supabase.from('bancas').select('*').order('created_at', { ascending: false }),
+          supabase.from('horarios').select('*').eq('ativo', true).order('data', { ascending: true }),
+          supabase.from('salas').select('*').eq('ativa', true).order('nome', { ascending: true }),
+          supabase
+            .from('professores')
+            .select('id, nome, user_id')
+            .eq('ativo', true)
+            .order('nome', { ascending: true }),
+          supabase.from('alunos_precadastro').select('id', { count: 'exact', head: true }),
+        ])
+      );
+
+      if (!isMountedRef.current) return;
+
+      const primeiraFalha = [bRes, hRes, sRes, pRes, preRes].find((r) => r?.error)?.error;
+      if (primeiraFalha) {
+        throw new Error(primeiraFalha.message || 'Falha ao consultar o banco de dados.');
+      }
+
       setBancas(bRes.data || []);
       setHorarios(hRes.data || []);
       setSalas(sRes.data || []);
       setProfessores(pRes.data || []);
       setTotalPreCadastro(preRes.count || 0);
     } catch (e) {
+      if (!isMountedRef.current) return;
       console.error(e);
+      setErroCarregamento(e.message || 'Não foi possível carregar as bancas.');
     } finally {
-      setLoading(false);
+      if (isMountedRef.current) {
+        setLoading(false);
+      }
     }
-  }
+  }, []);
 
   useEffect(() => {
-    load();
-  }, []);
+    const isMountedRef = { current: true };
+    load(isMountedRef);
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, [load]);
 
   function update(field, value) {
     setForm((f) => ({ ...f, [field]: value }));
@@ -577,6 +608,13 @@ export default function AdminBancas() {
       {loading ? (
         <div className="flex justify-center py-12">
           <div className="w-8 h-8 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
+        </div>
+      ) : erroCarregamento ? (
+        <div className="bg-white rounded-xl border border-red-200 p-8 text-center space-y-3">
+          <p className="text-sm font-medium text-red-700">{erroCarregamento}</p>
+          <Button type="button" variant="outline" onClick={() => load()} className="gap-2">
+            <RefreshCw className="w-4 h-4" /> Tentar novamente
+          </Button>
         </div>
       ) : (
         <div className="space-y-3">

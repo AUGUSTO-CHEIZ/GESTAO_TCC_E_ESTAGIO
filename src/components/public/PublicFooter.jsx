@@ -1,11 +1,13 @@
-import { Link } from 'react-router-dom';
+import { useState } from 'react';
 import { GraduationCap } from 'lucide-react';
 
 export default function PublicFooter() {
+  const [logoErro, setLogoErro] = useState(false);
+
   return (
     <footer className="bg-slate-950 text-slate-300 border-t border-slate-800 mt-auto">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-8 items-center">
           <div>
             <div className="flex items-center gap-2 mb-3">
               <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-indigo-600 to-violet-600 flex items-center justify-center">
@@ -42,19 +44,23 @@ export default function PublicFooter() {
             </div>
           </div>
 
-          <div>
-            <h3 className="font-semibold text-white mb-3">Links</h3>
-            <ul className="space-y-1.5 text-sm text-slate-400">
-              <li><Link to="/" className="hover:text-white transition">Início</Link></li>
-              <li><Link to="/inscricao/apresentador" className="hover:text-white transition">Inscrição Apresentador</Link></li>
-              <li><Link to="/inscricao/espectador" className="hover:text-white transition">Inscrição Espectador</Link></li>
-              <li><Link to="/minha-inscricao" className="hover:text-white transition">Minha Inscrição</Link></li>
-            </ul>
+          <div className="flex md:justify-end items-center">
+            {!logoErro && (
+              <a
+                href="https://github.com/augusto-cheiz"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-block"
+              >
+                <img
+                  src="/minha-logo.png"
+                  alt="Cheiz.dev"
+                  onError={() => setLogoErro(true)}
+                  className="h-24 w-auto object-contain opacity-95 hover:opacity-100 transition cursor-pointer"
+                />
+              </a>
+            )}
           </div>
-        </div>
-
-        <div className="border-t border-slate-800/80 mt-8 pt-6 text-center text-xs text-slate-500">
-          © 2026 Bancas TCC - Psicologia. Todos os direitos reservados.
         </div>
       </div>
     </footer>
