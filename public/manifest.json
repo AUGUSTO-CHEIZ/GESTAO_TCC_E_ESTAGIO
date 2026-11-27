@@ -1,9 +1,26 @@
 {
-  "name": "Bancas TCC Psicologia",
-  "short_name": "Bancas TCC",
-  "description": "Plataforma de gestão e acompanhamento de bancas de TCC do curso de Psicologia.",
+  "name": "Psicologia Unesc",
+  "short_name": "Psicologia Unesc",
+  "description": "Sistema de agendamento, inscrição e acompanhamento das bancas de TCC de Psicologia.",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
-  "background_color": "#ffffff",
-  "theme_color": "#4f46e5"
+  "orientation": "portrait-primary",
+  "background_color": "#f8fafc",
+  "theme_color": "#4f46e5",
+  "lang": "pt-BR",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
 }

@@ -1,4 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { QRCodeCanvas } from 'qrcode.react';
 import { supabase } from '@/lib/supabase';
 import {
   vincularProfessorUsuario,
@@ -7,40 +9,31 @@ import {
   finalizarSegundaChamada,
   adicionarAlunoUltimaHora,
 } from '@/lib/api';
+import { registrarLog } from '@/lib/auditLog';
 import { useAuth } from '@/lib/AuthContext';
-import { useToast } from '@/components/ui/use-toast';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { useToast } from '@/components/ui/use-toast';
 import {
   GraduationCap,
-  LogOut,
-  Users,
-  UserPlus,
-  CheckCircle,
-  Circle,
-  ChevronDown,
-  ChevronUp,
-  AlertCircle,
   Calendar,
-  MapPin,
   Clock,
-  CheckCheck,
-  X,
+  MapPin,
+  Users,
+  CheckCircle2,
+  Circle,
+  UserPlus,
   QrCode,
+  LogOut,
   MessageCircle,
+  Lock,
+  Eye,
+  X,
   Copy,
   Check,
+  AlertCircle,
 } from 'lucide-react';
-
-const STATUS_BADGE = {
-  pendente: { label: 'Pendente', cls: 'bg-amber-100 text-amber-700' },
-  agendada: { label: 'Agendada', cls: 'bg-indigo-100 text-indigo-700' },
-  aprovada: { label: 'Aprovada', cls: 'bg-emerald-100 text-emerald-700' },
-  realizada: { label: 'Finalizada', cls: 'bg-slate-800 text-white' },
-  finalizada: { label: 'Finalizada', cls: 'bg-slate-800 text-white' },
-  cancelada: { label: 'Cancelada', cls: 'bg-red-100 text-red-700' },
-};
 
 const emptyAddForm = {
   tipo: 'academico',
@@ -53,57 +46,95 @@ const emptyAddForm = {
   cpf: '',
 };
 
+function formatarDataBr(dataStr) {
+  if (!dataStr) return '';
+  if (/^\d{4}-\d{2}-\d{2}/.test(dataStr)) {
+    const [ano, mes, dia] = dataStr.slice(0, 10).split('-');
+    return `${dia}/${mes}/${ano}`;
+  }
+  return dataStr;
+}
+
+function getBadgeStatus(status) {
+  const norm = String(status || '').toLowerCase();
+  if (norm === 'agendada' || norm === 'aprovada') {
+    return {
+      label: 'Agendada',
+      className: 'bg-emerald-100 text-emerald-800 border-emerald-200',
+    };
+  }
+  if (norm === 'realizada' || norm === 'finalizada') {
+    return {
+      label: 'Finalizada',
+      className: 'bg-slate-200 text-slate-700 border-slate-300',
+    };
+  }
+  return {
+    label: 'Pendente',
+    className: 'bg-amber-100 text-amber-800 border-amber-200',
+  };
+}
+
 export default function ProfessorDashboard() {
   const { user, logout } = useAuth();
-  const [professor, setProfessor] = useState(null);
-  const [professoresMap, setProfessoresMap] = useState({});
+  const navigate = useNavigate();
+  const { toast } = useToast();
+
+  const [orientador, setOrientador] = useState(null);
   const [bancas, setBancas] = useState([]);
+  const [mapaProfessores, setMapaProfessores] = useState({});
   const [inscricoes, setInscricoes] = useState({});
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [bancaExpandida, setBancaExpandida] = useState(null);
+  const [erroAcesso, setErroAcesso] = useState('');
 
-  // Controle de horários das chamadas por banca
   const [horariosChamada, setHorariosChamada] = useState({});
   const [processandoChamada, setProcessandoChamada] = useState(null);
 
-  // Modal de inclusão de espectador de última hora
   const [bancaAddModal, setBancaAddModal] = useState(null);
   const [addForm, setAddForm] = useState(emptyAddForm);
   const [salvandoAdd, setSalvandoAdd] = useState(false);
 
-  // Modal de QR Code da banca
-  const [bancaQrModal, setBancaQrModal] = useState(null);
+  const [qrBanca, setQrBanca] = useState(null);
   const [linkCopiado, setLinkCopiado] = useState(false);
 
-  const { toast } = useToast();
-
-  async function carregarDados() {
-    if (!user?.id) return;
+  const carregarDados = useCallback(async () => {
+    setLoading(true);
+    setErroAcesso('');
     try {
-      const res = await vincularProfessorUsuario();
-      if (res.data?.error) {
-        setError(res.data.error);
+      const vincRes = await vincularProfessorUsuario();
+      if (vincRes.data?.error) {
+        setErroAcesso(vincRes.data.error);
+        setLoading(false);
         return;
       }
 
-      const prof = res.data.professor;
-      setProfessor(prof);
+      const prof = vincRes.data?.professor;
+      setOrientador(prof);
 
-      const { data: profsData } = await supabase
+      const { data: todosProfs } = await supabase
         .from('professores')
-        .select('id, nome');
-      const mapProfs = {};
-      (profsData || []).forEach((p) => {
-        mapProfs[p.id] = p.nome;
-      });
-      setProfessoresMap(mapProfs);
+        .select('id, nome, titulacao');
 
-      const filtros = [`orientador_user_id.eq.${user.id}`];
+      const mapProfs = {};
+      for (const p of todosProfs || []) {
+        mapProfs[p.id] = p.titulacao ? `${p.titulacao} ${p.nome}` : p.nome;
+      }
+      setMapaProfessores(mapProfs);
+
+      const filtros = [];
       if (prof?.id) {
         filtros.push(`orientador_id.eq.${prof.id}`);
         filtros.push(`avaliador1_id.eq.${prof.id}`);
         filtros.push(`avaliador2_id.eq.${prof.id}`);
+      }
+      if (user?.id) {
+        filtros.push(`orientador_user_id.eq.${user.id}`);
+      }
+
+      if (filtros.length === 0) {
+        setBancas([]);
+        setLoading(false);
+        return;
       }
 
       const { data: bancasData, error: bErr } = await supabase
@@ -115,62 +146,48 @@ export default function ProfessorDashboard() {
 
       if (bErr) throw bErr;
 
-      const getPrioridadeStatus = (banca) => {
-        const st = String(banca.status || '').trim().toLowerCase();
-        if (st === 'realizada' || st === 'finalizada' || banca.chamada2_concluida) return 3;
-        if (st === 'pendente') return 2;
-        if (st === 'agendada' || st === 'aprovada') return 1;
-        return 2;
-      };
-
-      const bancasList = [...(bancasData || [])].sort(
-        (a, b) => getPrioridadeStatus(a) - getPrioridadeStatus(b)
-      );
+      const bancasList = bancasData || [];
       setBancas(bancasList);
 
-      const agora = new Date().toTimeString().slice(0, 5);
-      const horariosIniciais = {};
-      bancasList.forEach((b) => {
-        horariosIniciais[b.id] = b.chamada1_concluida
-          ? b.chamada2_horario || agora
-          : b.chamada1_horario || agora;
-      });
-      setHorariosChamada((prev) => ({ ...horariosIniciais, ...prev }));
-
       const inscMap = {};
-      if (bancasList.length > 0) {
-        const ids = bancasList.map((b) => b.id);
-        const { data: todasInscs } = await supabase
+      for (const banca of bancasList) {
+        const { data: inscs } = await supabase
           .from('inscricoes')
           .select('*')
-          .in('banca_id', ids)
+          .eq('banca_id', banca.id)
           .neq('tipo', 'apresentador')
-          .order('created_at', { ascending: true });
-
-        for (const banca of bancasList) {
-          inscMap[banca.id] = (todasInscs || []).filter((i) => i.banca_id === banca.id);
-        }
+          .order('nome', { ascending: true });
+        inscMap[banca.id] = inscs || [];
       }
       setInscricoes(inscMap);
-    } catch (e) {
-      setError(e.message || 'Erro ao carregar dados do professor');
+    } catch (err) {
+      console.error(err);
+      toast({
+        title: 'Erro ao carregar bancas',
+        description: err.message,
+        variant: 'destructive',
+      });
     } finally {
       setLoading(false);
     }
-  }
+  }, [user?.id, toast]);
 
   useEffect(() => {
     carregarDados();
-  }, [user?.id]);
+  }, [carregarDados]);
 
-  // Resposta instantânea ao marcar/desmarcar presença (somente bancas agendadas)
-  async function togglePresenca(banca, inscricao) {
-    const statusNorm = String(banca.status || '').trim().toLowerCase();
-    const encerrada =
+  function isBancaEditavel(banca) {
+    const statusNorm = String(banca.status || '').toLowerCase();
+    const jaFinalizada =
       statusNorm === 'realizada' ||
       statusNorm === 'finalizada' ||
       Boolean(banca.chamada2_concluida);
-    if (statusNorm !== 'agendada' || encerrada) return;
+    if (jaFinalizada) return false;
+    return statusNorm === 'agendada' || statusNorm === 'aprovada';
+  }
+
+  async function togglePresenca(banca, inscricao) {
+    if (!isBancaEditavel(banca)) return;
 
     const etapaAtual = banca.chamada1_concluida ? 2 : 1;
     const novoValor = !inscricao.presente;
@@ -215,10 +232,11 @@ export default function ProfessorDashboard() {
   }
 
   async function handleConcluirChamada1(banca) {
+    if (!isBancaEditavel(banca)) return;
     const hora = horariosChamada[banca.id] || new Date().toTimeString().slice(0, 5);
     if (
       !confirm(
-        `Concluir a 1ª chamada às ${hora}? Os espectadores ausentes serão removidos da lista para liberar vagas na 2ª hora, mantendo os presentes.`
+        `Concluir a 1ª chamada às ${hora}? Os espectadores não marcados serão movidos para o histórico de ausentes e suas vagas serão liberadas para a 2ª hora.`
       )
     ) {
       return;
@@ -226,23 +244,24 @@ export default function ProfessorDashboard() {
 
     setProcessandoChamada(banca.id);
     try {
-      const presentesIds = (inscricoes[banca.id] || [])
-        .filter((i) => i.presente)
-        .map((i) => i.id);
-
       const res = await finalizarPrimeiraChamada({
         banca_id: banca.id,
         horario_chamada: hora,
-        presentes_ids: presentesIds,
       });
 
       if (res.data?.error) throw new Error(res.data.error);
 
+      const vagasLiberadas = res.data?.vagas_liberadas || 0;
+
+      await registrarLog({
+        acao: 'CHAMADA_1',
+        entidade: 'BANCAS',
+        detalhes: `Concluiu 1ª chamada às ${hora} na banca "${banca.titulo_tcc}" (${vagasLiberadas} vaga(s) liberada(s))`,
+      });
+
       toast({
         title: '1ª Chamada concluída!',
-        description: `${res.data?.presentes_mantidos || 0} presente(s) mantido(s) e ${
-          res.data?.vagas_disponiveis ?? res.data?.vagas_liberadas ?? 0
-        } vaga(s) aberta(s) para a 2ª hora.`,
+        description: `${vagasLiberadas} vaga(s) liberada(s) para a 2ª hora.`,
       });
       await carregarDados();
     } catch (e) {
@@ -253,11 +272,10 @@ export default function ProfessorDashboard() {
   }
 
   async function handleConcluirChamada2(banca) {
+    if (!isBancaEditavel(banca)) return;
     const hora = horariosChamada[banca.id] || new Date().toTimeString().slice(0, 5);
     if (
-      !confirm(
-        `Encerrar a 2ª chamada às ${hora} e finalizar esta apresentação?`
-      )
+      !confirm(`Encerrar a 2ª chamada às ${hora} e finalizar esta apresentação?`)
     ) {
       return;
     }
@@ -271,9 +289,15 @@ export default function ProfessorDashboard() {
 
       if (res.data?.error) throw new Error(res.data.error);
 
+      await registrarLog({
+        acao: 'CHAMADA_2',
+        entidade: 'BANCAS',
+        detalhes: `Concluiu 2ª chamada às ${hora} e finalizou a banca "${banca.titulo_tcc}"`,
+      });
+
       toast({
         title: '2ª Chamada concluída!',
-        description: 'Apresentação finalizada e lista final registrada.',
+        description: 'Apresentação finalizada e lista de presença encerrada.',
       });
       await carregarDados();
     } catch (e) {
@@ -323,6 +347,12 @@ export default function ProfessorDashboard() {
 
       if (res.data?.error) throw new Error(res.data.error);
 
+      await registrarLog({
+        acao: 'ADICIONAR_ULTIMA_HORA',
+        entidade: 'INSCRICOES',
+        detalhes: `Adicionou espectador de última hora "${addForm.nome.trim()}" (${addForm.tipo}) na banca "${bancaAddModal.titulo_tcc}"`,
+      });
+
       toast({ title: 'Espectador adicionado e marcado como presente!' });
       setBancaAddModal(null);
       setAddForm(emptyAddForm);
@@ -334,384 +364,391 @@ export default function ProfessorDashboard() {
     }
   }
 
-  function handleCopiarLinkQr(url) {
+  async function handleSair() {
+    if (logout) {
+      await logout();
+    } else {
+      await supabase.auth.signOut();
+    }
+    navigate('/');
+  }
+
+  function copiarLinkQr(url) {
     navigator.clipboard.writeText(url);
     setLinkCopiado(true);
-    toast({ title: 'Link de inscrição copiado!' });
+    toast({ title: 'Link da apresentação copiado!' });
     setTimeout(() => setLinkCopiado(false), 2500);
   }
 
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50">
-        <div className="w-8 h-8 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
-      </div>
-    );
-  }
+  const nomeOrientadorExibicao = orientador
+    ? orientador.titulacao
+      ? `${orientador.titulacao} ${orientador.nome}`
+      : orientador.nome
+    : user?.email || 'Orientador(a)';
 
-  if (error) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">
-        <div className="max-w-md w-full bg-white rounded-2xl shadow-lg border border-slate-200 p-8 text-center">
-          <div className="w-16 h-16 rounded-full bg-red-100 flex items-center justify-center mx-auto mb-4">
-            <AlertCircle className="w-8 h-8 text-red-600" />
-          </div>
-          <h2 className="text-xl font-bold text-slate-900 mb-2">Acesso não autorizado</h2>
-          <p className="text-slate-500 mb-6">{error}</p>
-          <Button onClick={() => logout()} className="w-full">
-            Sair
-          </Button>
-        </div>
-      </div>
-    );
-  }
-
-  const tipoLabels = {
-    apresentador: 'Apresentador',
-    academico: 'Acadêmico',
-    familiar: 'Familiar / Amigo',
-  };
-
-  const totalInscritos = Object.values(inscricoes).flat().length;
-  const totalPresentes = Object.values(inscricoes)
-    .flat()
-    .filter((i) => i.presente).length;
-
-  const qrLink = bancaQrModal
-    ? `${window.location.origin}/inscricao/espectador?banca=${bancaQrModal.id}`
-    : '';
-  const qrImgUrl = qrLink
-    ? `https://api.qrserver.com/v1/create-qr-code/?size=260x260&margin=10&data=${encodeURIComponent(
-        qrLink
-      )}`
+  const linkQrAtual = qrBanca
+    ? `${window.location.origin}/inscricao/espectador?banca=${qrBanca.id}`
     : '';
 
   return (
-    <div className="min-h-screen bg-slate-50">
-      {/* Cabeçalho */}
-      <header className="bg-slate-900 text-white border-b border-slate-800">
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 py-4 flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-indigo-600 flex items-center justify-center">
+    <div className="min-h-screen bg-slate-50 flex flex-col">
+      {/* Cabeçalho Responsivo */}
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-30">
+        <div className="max-w-5xl mx-auto px-3 sm:px-6 py-3 sm:py-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-gradient-to-br from-indigo-600 to-violet-600 flex items-center justify-center shrink-0">
               <GraduationCap className="w-5 h-5 text-white" />
             </div>
-            <div>
-              <h1 className="font-bold text-base sm:text-lg leading-tight">
-                Painel do Professor
+            <div className="min-w-0">
+              <h1 className="text-base sm:text-lg font-bold text-slate-900 truncate">
+                Painel do Orientador
               </h1>
-              <p className="text-xs text-slate-300">
-                {professor?.nome || user?.email}
-              </p>
+              <p className="text-xs text-slate-500 truncate">{nomeOrientadorExibicao}</p>
             </div>
           </div>
 
-          <div className="flex items-center gap-2 sm:gap-3">
+          <div className="flex items-center gap-2 shrink-0">
             <a
               href="https://wa.me/554834312650"
               target="_blank"
               rel="noopener noreferrer"
-              className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs sm:text-sm bg-emerald-600 hover:bg-emerald-700 text-white font-medium transition"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 sm:px-3 sm:py-2 rounded-lg text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition"
             >
-              <MessageCircle className="w-4 h-4" /> Suporte Coordenação
+              <MessageCircle className="w-3.5 h-3.5 shrink-0" />
+              <span>Suporte Coordenação</span>
             </a>
 
-            <button
-              onClick={() => logout()}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs sm:text-sm text-slate-300 hover:bg-slate-800 transition"
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleSair}
+              className="gap-1.5 text-xs"
             >
-              <LogOut className="w-4 h-4" /> Sair
-            </button>
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Sair</span>
+            </Button>
           </div>
         </div>
       </header>
 
-      {/* Conteúdo */}
-      <main className="max-w-5xl mx-auto px-4 sm:px-6 py-8 space-y-6">
-        {/* Resumo */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <div className="bg-white rounded-xl border border-slate-200 p-4">
-            <p className="text-xs text-slate-500">Minhas Bancas</p>
-            <p className="text-2xl font-bold text-slate-900">{bancas.length}</p>
+      {/* Conteúdo Principal */}
+      <main className="flex-1 max-w-5xl w-full mx-auto px-3 sm:px-6 py-5 sm:py-8 space-y-5">
+        {loading ? (
+          <div className="flex justify-center py-16">
+            <div className="w-8 h-8 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
           </div>
-          <div className="bg-white rounded-xl border border-slate-200 p-4">
-            <p className="text-xs text-slate-500">Total de Participantes</p>
-            <p className="text-2xl font-bold text-indigo-600">{totalInscritos}</p>
+        ) : erroAcesso ? (
+          <div className="bg-white rounded-2xl border border-red-200 p-6 text-center space-y-3">
+            <AlertCircle className="w-8 h-8 text-red-500 mx-auto" />
+            <p className="text-sm font-medium text-red-700">{erroAcesso}</p>
           </div>
-          <div className="bg-white rounded-xl border border-slate-200 p-4">
-            <p className="text-xs text-slate-500">Presenças Confirmadas</p>
-            <p className="text-2xl font-bold text-emerald-600">{totalPresentes}</p>
-          </div>
-        </div>
-
-        {/* Lista de Bancas */}
-        {bancas.length === 0 ? (
-          <div className="bg-white rounded-xl border border-slate-200 p-10 text-center text-slate-500">
-            Nenhuma banca vinculada ao seu cadastro até o momento.
+        ) : bancas.length === 0 ? (
+          <div className="bg-white rounded-2xl border border-slate-200 p-8 sm:p-12 text-center space-y-2">
+            <GraduationCap className="w-10 h-10 text-slate-300 mx-auto" />
+            <h2 className="text-base font-semibold text-slate-800">
+              Nenhuma banca vinculada no momento
+            </h2>
+            <p className="text-xs sm:text-sm text-slate-500 max-w-md mx-auto">
+              Assim que você for selecionado(a) como orientador(a) ou avaliador(a) em uma banca, ela aparecerá aqui.
+            </p>
           </div>
         ) : (
-          <div className="space-y-4">
+          <div className="space-y-5">
             {bancas.map((banca) => {
-              const inscs = inscricoes[banca.id] || [];
-              const presentes = inscs.filter((i) => i.presente).length;
-              const expandida = bancaExpandida === banca.id;
-              const statusNorm = String(banca.status || '').trim().toLowerCase();
-              const encerrada =
-                statusNorm === 'realizada' ||
-                statusNorm === 'finalizada' ||
-                Boolean(banca.chamada2_concluida);
-              const podeEditar = statusNorm === 'agendada' && !encerrada;
-              const badge =
-                STATUS_BADGE[statusNorm] || {
-                  label: banca.status || 'Agendada',
-                  cls: 'bg-slate-100 text-slate-700',
-                };
+              const listaEspectadores = inscricoes[banca.id] || [];
+              const editavel = isBancaEditavel(banca);
+              const badge = getBadgeStatus(banca.status);
+              const etapaChamada = banca.chamada1_concluida ? 2 : 1;
 
-              const av1Nome =
+              const papeis = [];
+              if (
+                banca.orientador_id === orientador?.id ||
+                banca.orientador_user_id === user?.id
+              ) {
+                papeis.push('Orientador(a)');
+              }
+              if (banca.avaliador1_id === orientador?.id) {
+                papeis.push('Avaliador(a) 1');
+              }
+              if (banca.avaliador2_id === orientador?.id) {
+                papeis.push('Avaliador(a) 2');
+              }
+
+              const nomeAvaliador1 =
                 banca.avaliador1_nome ||
-                (banca.avaliador1_id ? professoresMap[banca.avaliador1_id] : null);
-              const av2Nome =
+                (banca.avaliador1_id ? mapaProfessores[banca.avaliador1_id] : '') ||
+                'Não definido';
+
+              const nomeAvaliador2 =
                 banca.avaliador2_tipo === 'externo'
-                  ? banca.avaliador2_externo_nome || banca.avaliador2_nome
+                  ? [banca.avaliador2_externo_titulacao, banca.avaliador2_externo_nome]
+                      .filter(Boolean)
+                      .join(' ') || 'Avaliador Externo'
                   : banca.avaliador2_nome ||
-                    (banca.avaliador2_id ? professoresMap[banca.avaliador2_id] : null);
-              const avaliadoresTexto = [av1Nome, av2Nome].filter(Boolean).join(' • ');
+                    (banca.avaliador2_id ? mapaProfessores[banca.avaliador2_id] : '') ||
+                    'Não definido';
+
+              const presentesCount = listaEspectadores.filter((i) => i.presente).length;
+              const vagasTotais = Number(banca.vagas_espectadores || 30);
+              const vagasDisponiveis = Math.max(0, vagasTotais - listaEspectadores.length);
 
               return (
                 <div
                   key={banca.id}
-                  className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm"
+                  className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden"
                 >
-                  <button
-                    type="button"
-                    onClick={() => setBancaExpandida(expandida ? null : banca.id)}
-                    className="w-full text-left p-5 hover:bg-slate-50/80 transition flex items-start justify-between gap-4"
-                  >
-                    <div className="space-y-1.5 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
+                  {/* Cabeçalho do Card da Banca */}
+                  <div className="p-4 sm:p-6 bg-slate-50/70 border-b border-slate-100 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-1.5">
                         <span
-                          className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${badge.cls}`}
+                          className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold border ${badge.className}`}
                         >
                           {badge.label}
                         </span>
 
-                        {banca.chamada1_concluida && podeEditar && (
-                          <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800">
-                            2ª Hora Aberta (1ª chamada às {banca.chamada1_horario})
-                          </span>
-                        )}
-
-                        {banca.horario_descricao && (
-                          <span className="flex items-center gap-1 text-xs text-slate-500">
-                            <Calendar className="w-3.5 h-3.5" /> {banca.horario_descricao}
-                          </span>
-                        )}
-
-                        {banca.sala_nome && (
-                          <span className="flex items-center gap-1 text-xs text-slate-500">
-                            <MapPin className="w-3.5 h-3.5" /> {banca.sala_nome}
+                        {papeis.length > 0 && (
+                          <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-violet-100 text-violet-800 border border-violet-200">
+                            {papeis.join(' • ')}
                           </span>
                         )}
                       </div>
 
-                      <h3 className="font-semibold text-slate-900 text-base">
-                        {banca.titulo_tcc}
-                      </h3>
+                      {!editavel && (
+                        <span className="inline-flex items-center gap-1 text-xs font-medium text-slate-500 bg-white px-2.5 py-1 rounded-lg border border-slate-200">
+                          <Eye className="w-3.5 h-3.5" /> Somente visualização
+                        </span>
+                      )}
+                    </div>
 
-                      <p className="text-xs text-slate-600">
-                        Apresentador: <strong>{banca.apresentador_nome || 'Não informado'}</strong>
-                        {banca.orientador_nome ? ` • Orientador: ${banca.orientador_nome}` : ''}
+                    <h2 className="text-base sm:text-lg font-bold text-slate-900 break-words leading-snug">
+                      {banca.titulo_tcc}
+                    </h2>
+
+                    {/* Informações da Apresentação e Banca */}
+                    <div className="space-y-1.5 text-xs sm:text-sm text-slate-600">
+                      <p className="break-words">
+                        <strong className="text-slate-800">Apresentador(a):</strong>{' '}
+                        {banca.apresentador_nome || '—'}
+                      </p>
+                      <p className="break-words">
+                        <strong className="text-slate-800">Avaliador(a) 1:</strong> {nomeAvaliador1}
+                      </p>
+                      <p className="break-words">
+                        <strong className="text-slate-800">Avaliador(a) 2:</strong> {nomeAvaliador2}
+                        {banca.avaliador2_tipo === 'externo' && ' (Externo)'}
                       </p>
 
-                      {avaliadoresTexto && (
+                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 pt-1 text-xs text-slate-500">
+                        {banca.horario_data && (
+                          <span className="inline-flex items-center gap-1">
+                            <Calendar className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                            {formatarDataBr(banca.horario_data)}
+                          </span>
+                        )}
+                        {banca.horario_descricao && (
+                          <span className="inline-flex items-center gap-1">
+                            <Clock className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                            {banca.horario_descricao}
+                          </span>
+                        )}
+                        {banca.sala_nome && (
+                          <span className="inline-flex items-center gap-1">
+                            <MapPin className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                            {banca.sala_nome}
+                          </span>
+                        )}
+                        <span className="inline-flex items-center gap-1 font-medium text-slate-700">
+                          <Users className="w-3.5 h-3.5 text-indigo-500 shrink-0" />
+                          {listaEspectadores.length} inscrito(s) • {vagasDisponiveis} vaga(s) livre(s)
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Ações disponíveis apenas quando Agendada */}
+                    {editavel && (
+                      <div className="pt-2 flex flex-col sm:flex-row flex-wrap gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            setAddForm(emptyAddForm);
+                            setBancaAddModal(banca);
+                          }}
+                          className="gap-1.5 w-full sm:w-auto justify-center"
+                        >
+                          <UserPlus className="w-4 h-4 text-indigo-600" />
+                          Adicionar Espectador
+                        </Button>
+
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            setLinkCopiado(false);
+                            setQrBanca(banca);
+                          }}
+                          className="gap-1.5 w-full sm:w-auto justify-center"
+                        >
+                          <QrCode className="w-4 h-4 text-indigo-600" />
+                          QR Code da Banca
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Corpo do Card: Lista de Chamada */}
+                  <div className="p-4 sm:p-6 space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <h3 className="text-sm font-semibold text-slate-900">
+                          {banca.chamada2_concluida
+                            ? 'Lista Final de Espectadores'
+                            : etapaChamada === 1
+                            ? '1ª Chamada — 1ª Hora'
+                            : '2ª Chamada — Encerramento'}
+                        </h3>
                         <p className="text-xs text-slate-500">
-                          Avaliadores:{' '}
-                          <span className="text-slate-700 font-medium">{avaliadoresTexto}</span>
+                          {presentesCount} presente(s) de {listaEspectadores.length} espectador(es)
+                          {banca.chamada1_horario && ` • 1ª chamada às ${banca.chamada1_horario}`}
+                          {banca.chamada2_horario && ` • Encerrada às ${banca.chamada2_horario}`}
                         </p>
-                      )}
+                      </div>
                     </div>
 
-                    <div className="flex items-center gap-3 shrink-0">
-                      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700 bg-slate-100 px-3 py-1 rounded-full">
-                        <Users className="w-3.5 h-3.5 text-indigo-600" />
-                        {presentes}/{inscs.length} presentes
-                      </span>
-                      {expandida ? (
-                        <ChevronUp className="w-5 h-5 text-slate-400" />
-                      ) : (
-                        <ChevronDown className="w-5 h-5 text-slate-400" />
-                      )}
-                    </div>
-                  </button>
-
-                  {expandida && (
-                    <div className="border-t border-slate-100 bg-slate-50/60 p-5 space-y-4">
-                      {/* Barra de ações (somente para bancas Agendadas) */}
-                      {podeEditar ? (
-                        <div className="bg-white rounded-xl border border-slate-200 p-4 flex flex-wrap items-center justify-between gap-4">
-                          <div className="flex flex-wrap items-center gap-3">
-                            <div className="flex items-center gap-2">
-                              <Clock className="w-4 h-4 text-indigo-600" />
-                              <Label className="text-xs font-semibold text-slate-700">
-                                {banca.chamada1_concluida
-                                  ? 'Horário 2ª Chamada:'
-                                  : 'Horário 1ª Chamada:'}
-                              </Label>
-                              <Input
-                                type="time"
-                                value={horariosChamada[banca.id] || ''}
-                                onChange={(e) =>
-                                  setHorariosChamada((prev) => ({
-                                    ...prev,
-                                    [banca.id]: e.target.value,
-                                  }))
-                                }
-                                className="w-28 h-8 text-xs"
-                              />
-                            </div>
-
-                            {!banca.chamada1_concluida ? (
-                              <Button
-                                type="button"
-                                size="sm"
-                                disabled={processandoChamada === banca.id}
-                                onClick={() => handleConcluirChamada1(banca)}
-                                className="bg-amber-600 hover:bg-amber-700 text-white gap-1.5"
-                              >
-                                <CheckCheck className="w-4 h-4" />
-                                {processandoChamada === banca.id
-                                  ? 'Processando...'
-                                  : 'Concluir 1ª Chamada e Liberar Vagas'}
-                              </Button>
-                            ) : (
-                              <Button
-                                type="button"
-                                size="sm"
-                                disabled={processandoChamada === banca.id}
-                                onClick={() => handleConcluirChamada2(banca)}
-                                className="bg-emerald-600 hover:bg-emerald-700 text-white gap-1.5"
-                              >
-                                <CheckCheck className="w-4 h-4" />
-                                {processandoChamada === banca.id
-                                  ? 'Encerrando...'
-                                  : 'Concluir 2ª Chamada e Encerrar'}
-                              </Button>
-                            )}
-                          </div>
-
-                          <div className="flex flex-wrap items-center gap-2">
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              onClick={() => {
-                                setLinkCopiado(false);
-                                setBancaQrModal(banca);
-                              }}
-                              className="gap-1.5"
-                            >
-                              <QrCode className="w-4 h-4 text-indigo-600" /> QR Code
-                            </Button>
-
-                            <Button
-                              type="button"
-                              size="sm"
-                              onClick={() => {
-                                setAddForm(emptyAddForm);
-                                setBancaAddModal(banca);
-                              }}
-                              className="gap-1.5"
-                            >
-                              <UserPlus className="w-4 h-4" /> Adicionar Espectador
-                            </Button>
-                          </div>
-                        </div>
-                      ) : encerrada ? (
-                        <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3 text-xs text-emerald-800 font-medium">
-                          Apresentação finalizada — somente visualização (1ª chamada:{' '}
-                          {banca.chamada1_horario || '-'} • 2ª chamada:{' '}
-                          {banca.chamada2_horario || '-'}).
-                        </div>
-                      ) : (
-                        <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-800 font-medium">
-                          Apresentação pendente — somente visualização. A chamada e a inclusão de
-                          espectadores ficam disponíveis apenas quando a banca estiver como{' '}
-                          <strong>Agendada</strong>.
-                        </div>
-                      )}
-
-                      {/* Lista de Chamada */}
-                      {inscs.length === 0 ? (
-                        <p className="text-sm text-slate-400 text-center py-6 bg-white rounded-xl border border-slate-200">
-                          Nenhum espectador inscrito nesta apresentação.
-                        </p>
-                      ) : (
-                        <div className="bg-white rounded-xl border border-slate-200 divide-y divide-slate-100">
-                          {inscs.map((insc) => (
+                    {listaEspectadores.length === 0 ? (
+                      <div className="rounded-xl border border-dashed border-slate-200 p-6 text-center text-xs sm:text-sm text-slate-500">
+                        Nenhum espectador inscrito nesta apresentação até o momento.
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {listaEspectadores.map((insc) => {
+                          const marcado = Boolean(insc.presente);
+                          return (
                             <div
                               key={insc.id}
-                              onClick={() => togglePresenca(banca, insc)}
-                              className={`p-3.5 flex items-center justify-between gap-3 transition ${
-                                !podeEditar
-                                  ? 'cursor-default'
-                                  : 'cursor-pointer hover:bg-slate-50 active:bg-slate-100'
+                              onClick={() => editavel && togglePresenca(banca, insc)}
+                              className={`p-3 sm:p-3.5 rounded-xl border transition flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${
+                                marcado
+                                  ? 'border-emerald-300 bg-emerald-50/60'
+                                  : 'border-slate-200 bg-white'
+                              } ${
+                                editavel
+                                  ? 'cursor-pointer hover:border-indigo-300'
+                                  : 'cursor-default opacity-90'
                               }`}
                             >
-                              <div className="flex items-center gap-3 min-w-0">
-                                <button
-                                  type="button"
-                                  disabled={!podeEditar}
-                                  className="flex-shrink-0 focus:outline-none"
-                                >
-                                  {insc.presente ? (
-                                    <CheckCircle className="w-6 h-6 text-emerald-600" />
+                              <div className="flex items-start gap-2.5 min-w-0">
+                                <div className="mt-0.5 shrink-0">
+                                  {marcado ? (
+                                    <CheckCircle2 className="w-5 h-5 text-emerald-600" />
                                   ) : (
-                                    <Circle className="w-6 h-6 text-slate-300" />
+                                    <Circle className="w-5 h-5 text-slate-300" />
                                   )}
-                                </button>
+                                </div>
 
-                                <div className="min-w-0">
-                                  <div className="flex flex-wrap items-center gap-2">
-                                    <p className="font-semibold text-sm text-slate-900 truncate">
-                                      {insc.nome}
-                                    </p>
-                                    <span
-                                      className={`px-2 py-0.5 rounded text-[11px] font-medium ${
-                                        insc.tipo === 'apresentador'
-                                          ? 'bg-indigo-100 text-indigo-700'
-                                          : insc.tipo === 'academico'
-                                          ? 'bg-violet-100 text-violet-700'
-                                          : 'bg-purple-100 text-purple-700'
-                                      }`}
-                                    >
-                                      {tipoLabels[insc.tipo] || insc.tipo}
+                                <div className="min-w-0 space-y-0.5">
+                                  <p className="text-sm font-medium text-slate-900 break-words">
+                                    {insc.nome}
+                                  </p>
+                                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-500">
+                                    <span className="font-medium text-slate-600">
+                                      {insc.tipo === 'academico'
+                                        ? 'Acadêmico'
+                                        : 'Familiar / Amigo'}
                                     </span>
+                                    {insc.codigo_academico && (
+                                      <span>• Cód: {insc.codigo_academico}</span>
+                                    )}
+                                    {insc.parentesco && <span>• {insc.parentesco}</span>}
                                     {insc.inclusao_ultima_hora && (
-                                      <span className="px-2 py-0.5 rounded bg-orange-100 text-orange-700 text-[11px] font-medium">
+                                      <span className="px-1.5 py-0.2 rounded bg-amber-100 text-amber-800 text-[10px] font-semibold">
                                         Última hora
                                       </span>
                                     )}
                                   </div>
-                                  <p className="text-xs text-slate-500 truncate">
-                                    {insc.codigo_academico ? `Cód: ${insc.codigo_academico} • ` : ''}
-                                    {insc.parentesco ? `${insc.parentesco} • ` : ''}
-                                    {insc.email || 'Sem e-mail'}
-                                  </p>
                                 </div>
                               </div>
 
-                              <span
-                                className={`text-xs font-semibold shrink-0 ${
-                                  insc.presente ? 'text-emerald-600' : 'text-slate-400'
-                                }`}
-                              >
-                                {insc.presente ? 'Presente' : 'Ausente'}
-                              </span>
+                              <div className="self-end sm:self-center shrink-0">
+                                <span
+                                  className={`inline-block px-2.5 py-1 rounded-full text-xs font-semibold ${
+                                    marcado
+                                      ? 'bg-emerald-600 text-white'
+                                      : 'bg-slate-100 text-slate-600'
+                                  }`}
+                                >
+                                  {marcado ? 'Presente' : 'Ausente'}
+                                </span>
+                              </div>
                             </div>
-                          ))}
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    {/* Controles de Conclusão da 1ª ou 2ª Chamada */}
+                    {editavel && (
+                      <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row sm:items-end justify-between gap-3">
+                        <div className="w-full sm:w-48">
+                          <Label className="text-xs text-slate-600 mb-1 block">
+                            Horário da {etapaChamada}ª chamada
+                          </Label>
+                          <Input
+                            type="time"
+                            value={
+                              horariosChamada[banca.id] ||
+                              new Date().toTimeString().slice(0, 5)
+                            }
+                            onChange={(e) =>
+                              setHorariosChamada((prev) => ({
+                                ...prev,
+                                [banca.id]: e.target.value,
+                              }))
+                            }
+                          />
                         </div>
-                      )}
-                    </div>
-                  )}
+
+                        {etapaChamada === 1 ? (
+                          <Button
+                            type="button"
+                            onClick={() => handleConcluirChamada1(banca)}
+                            disabled={processandoChamada === banca.id}
+                            className="w-full sm:w-auto bg-indigo-600 hover:bg-indigo-700"
+                          >
+                            {processandoChamada === banca.id
+                              ? 'Processando...'
+                              : 'Concluir 1ª Chamada e Liberar Vagas'}
+                          </Button>
+                        ) : (
+                          <Button
+                            type="button"
+                            onClick={() => handleConcluirChamada2(banca)}
+                            disabled={processandoChamada === banca.id}
+                            className="w-full sm:w-auto bg-emerald-600 hover:bg-emerald-700"
+                          >
+                            {processandoChamada === banca.id
+                              ? 'Finalizando...'
+                              : 'Concluir 2ª Chamada e Finalizar Banca'}
+                          </Button>
+                        )}
+                      </div>
+                    )}
+
+                    {!editavel && (
+                      <div className="pt-2 flex items-center gap-1.5 text-xs text-slate-500">
+                        <Lock className="w-3.5 h-3.5 shrink-0" />
+                        <span>
+                          {String(banca.status || '').toLowerCase() === 'pendente'
+                            ? 'Banca aguardando aprovação da coordenação para liberar a chamada.'
+                            : 'Apresentação finalizada. Alterações bloqueadas.'}
+                        </span>
+                      </div>
+                    )}
+                  </div>
                 </div>
               );
             })}
@@ -719,132 +756,63 @@ export default function ProfessorDashboard() {
         )}
       </main>
 
-      {/* Modal: QR Code para inscrição na banca */}
-      {bancaQrModal && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-xl space-y-4 text-center">
-            <div className="flex items-center justify-between text-left">
-              <h3 className="font-bold text-lg text-slate-900">QR Code de Inscrição</h3>
-              <button
-                type="button"
-                onClick={() => setBancaQrModal(null)}
-                className="p-1 text-slate-400 hover:text-slate-600"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="text-left bg-slate-50 rounded-xl p-3 border border-slate-200 space-y-1">
-              <p className="text-xs font-semibold text-slate-900">{bancaQrModal.titulo_tcc}</p>
-              {bancaQrModal.apresentador_nome && (
-                <p className="text-[11px] text-slate-600">
-                  Apresentador: {bancaQrModal.apresentador_nome}
-                </p>
-              )}
-              {bancaQrModal.horario_descricao && (
-                <p className="text-[11px] text-slate-500">{bancaQrModal.horario_descricao}</p>
-              )}
-            </div>
-
-            <div className="flex justify-center py-2">
-              <img
-                src={qrImgUrl}
-                alt="QR Code de Inscrição"
-                className="w-56 h-56 rounded-xl border border-slate-200 p-2 bg-white shadow-sm"
-              />
-            </div>
-
-            <p className="text-xs text-slate-500">
-              Aponte a câmera do celular para abrir a inscrição direta como espectador nesta banca.
-            </p>
-
-            <div className="flex gap-2 pt-1">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => handleCopiarLinkQr(qrLink)}
-                className="flex-1 gap-1.5 text-xs"
-              >
-                {linkCopiado ? (
-                  <>
-                    <Check className="w-4 h-4 text-emerald-600" /> Copiado
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-4 h-4" /> Copiar Link
-                  </>
-                )}
-              </Button>
-              <Button
-                type="button"
-                onClick={() => setBancaQrModal(null)}
-                className="flex-1 text-xs"
-              >
-                Fechar
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Modal: Adicionar Espectador de Última Hora */}
       {bancaAddModal && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="font-bold text-lg text-slate-900">
-                Adicionar Espectador
-              </h3>
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 max-w-md w-full p-5 sm:p-6 space-y-4 shadow-xl max-h-[90vh] overflow-y-auto">
+            <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-3">
+              <div>
+                <h3 className="font-bold text-slate-900 text-base">
+                  Adicionar Espectador (Última Hora)
+                </h3>
+                <p className="text-xs text-slate-500 line-clamp-1">
+                  {bancaAddModal.titulo_tcc}
+                </p>
+              </div>
               <button
                 type="button"
                 onClick={() => setBancaAddModal(null)}
-                className="p-1 text-slate-400 hover:text-slate-600"
+                className="text-slate-400 hover:text-slate-600 p-1"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <p className="text-xs text-slate-500">
-              Banca: <strong>{bancaAddModal.titulo_tcc}</strong>
-            </p>
-
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => setAddForm((f) => ({ ...f, tipo: 'academico' }))}
-                className={`p-3 rounded-xl border-2 text-left text-xs transition ${
-                  addForm.tipo === 'academico'
-                    ? 'border-indigo-600 bg-indigo-50 font-semibold text-indigo-900'
-                    : 'border-slate-200 text-slate-600'
-                }`}
-              >
-                Acadêmico
-                <span className="block text-[11px] font-normal text-slate-500">
-                  Com certificado
-                </span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setAddForm((f) => ({ ...f, tipo: 'familiar' }))}
-                className={`p-3 rounded-xl border-2 text-left text-xs transition ${
-                  addForm.tipo === 'familiar'
-                    ? 'border-indigo-600 bg-indigo-50 font-semibold text-indigo-900'
-                    : 'border-slate-200 text-slate-600'
-                }`}
-              >
-                Familiar / Amigo
-                <span className="block text-[11px] font-normal text-slate-500">
-                  E-mail opcional
-                </span>
-              </button>
-            </div>
-
-            <form onSubmit={handleSalvarUltimaHora} className="space-y-3">
+            <form onSubmit={handleSalvarUltimaHora} className="space-y-3.5">
               <div>
-                <Label className="text-xs">Nome completo *</Label>
+                <Label className="text-xs mb-1.5 block">Tipo de Espectador *</Label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setAddForm((f) => ({ ...f, tipo: 'academico' }))}
+                    className={`p-2.5 rounded-xl border-2 text-left text-xs font-semibold transition ${
+                      addForm.tipo === 'academico'
+                        ? 'border-indigo-600 bg-indigo-50 text-indigo-800'
+                        : 'border-slate-200 text-slate-600'
+                    }`}
+                  >
+                    Acadêmico
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAddForm((f) => ({ ...f, tipo: 'familiar' }))}
+                    className={`p-2.5 rounded-xl border-2 text-left text-xs font-semibold transition ${
+                      addForm.tipo === 'familiar'
+                        ? 'border-indigo-600 bg-indigo-50 text-indigo-800'
+                        : 'border-slate-200 text-slate-600'
+                    }`}
+                  >
+                    Familiar / Amigo
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <Label className="text-xs">Nome Completo *</Label>
                 <Input
                   value={addForm.nome}
                   onChange={(e) => setAddForm((f) => ({ ...f, nome: e.target.value }))}
+                  placeholder="Nome completo do espectador"
                   required
                 />
               </div>
@@ -858,40 +826,30 @@ export default function ProfessorDashboard() {
                       onChange={(e) =>
                         setAddForm((f) => ({ ...f, codigo_academico: e.target.value }))
                       }
+                      placeholder="Ex: 202412345"
                       required
                     />
                   </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <Label className="text-xs">Semestre</Label>
-                      <Input
-                        value={addForm.semestre}
-                        onChange={(e) =>
-                          setAddForm((f) => ({ ...f, semestre: e.target.value }))
-                        }
-                        placeholder="Ex: 5º"
-                      />
-                    </div>
-                    <div>
-                      <Label className="text-xs">E-mail (opcional)</Label>
-                      <Input
-                        type="email"
-                        value={addForm.email}
-                        onChange={(e) => setAddForm((f) => ({ ...f, email: e.target.value }))}
-                      />
-                    </div>
+                  <div>
+                    <Label className="text-xs">E-mail (para certificado)</Label>
+                    <Input
+                      type="email"
+                      value={addForm.email}
+                      onChange={(e) => setAddForm((f) => ({ ...f, email: e.target.value }))}
+                      placeholder="aluno@unesc.net"
+                    />
                   </div>
                 </>
               ) : (
                 <>
                   <div>
-                    <Label className="text-xs">Grau de Parentesco / Vínculo *</Label>
+                    <Label className="text-xs">Parentesco / Vínculo *</Label>
                     <Input
                       value={addForm.parentesco}
                       onChange={(e) =>
                         setAddForm((f) => ({ ...f, parentesco: e.target.value }))
                       }
-                      placeholder="Ex: Mãe, Pai, Amigo(a)..."
+                      placeholder="Ex: Mãe, Pai, Amigo(a)"
                       required
                     />
                   </div>
@@ -901,24 +859,71 @@ export default function ProfessorDashboard() {
                       type="email"
                       value={addForm.email}
                       onChange={(e) => setAddForm((f) => ({ ...f, email: e.target.value }))}
+                      placeholder="opcional@exemplo.com"
                     />
                   </div>
                 </>
               )}
 
-              <div className="flex justify-end gap-2 pt-2">
+              <div className="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-2">
                 <Button
                   type="button"
                   variant="outline"
                   onClick={() => setBancaAddModal(null)}
+                  className="w-full sm:w-auto"
                 >
                   Cancelar
                 </Button>
-                <Button type="submit" disabled={salvandoAdd}>
-                  {salvandoAdd ? 'Salvando...' : 'Adicionar e Confirmar Presença'}
+                <Button
+                  type="submit"
+                  disabled={salvandoAdd}
+                  className="w-full sm:w-auto"
+                >
+                  {salvandoAdd ? 'Salvando...' : 'Adicionar e Marcar Presença'}
                 </Button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: QR Code da Banca */}
+      {qrBanca && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-slate-200 max-w-sm w-full p-6 text-center space-y-4 shadow-xl">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-slate-900 text-base">QR Code para Espectadores</h3>
+              <button
+                type="button"
+                onClick={() => setQrBanca(null)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-500 break-words">{qrBanca.titulo_tcc}</p>
+
+            <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 inline-flex items-center justify-center mx-auto">
+              <QRCodeCanvas value={linkQrAtual} size={190} includeMargin />
+            </div>
+
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => copiarLinkQr(linkQrAtual)}
+              className="w-full gap-2"
+            >
+              {linkCopiado ? (
+                <>
+                  <Check className="w-4 h-4 text-emerald-600" /> Link Copiado!
+                </>
+              ) : (
+                <>
+                  <Copy className="w-4 h-4" /> Copiar Link de Inscrição
+                </>
+              )}
+            </Button>
           </div>
         </div>
       )}

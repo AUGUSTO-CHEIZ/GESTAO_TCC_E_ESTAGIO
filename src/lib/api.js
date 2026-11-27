@@ -1,5 +1,159 @@
 import { supabase } from '@/lib/supabase';
 
+const DOMINIOS_CORRETOS = [
+  'gmail.com',
+  'hotmail.com',
+  'outlook.com',
+  'yahoo.com',
+  'yahoo.com.br',
+  'icloud.com',
+  'live.com',
+  'unesc.net',
+];
+
+const CORRECOES_DIRETA_DOMINIO = {
+  'gamil.com': 'gmail.com',
+  'gmial.com': 'gmail.com',
+  'gmai.com': 'gmail.com',
+  'gmal.com': 'gmail.com',
+  'gmail.con': 'gmail.com',
+  'gmail.com.br': 'gmail.com',
+  'hotmal.com': 'hotmail.com',
+  'hotmai.com': 'hotmail.com',
+  'htmail.com': 'hotmail.com',
+  'hotmail.con': 'hotmail.com',
+  'outlok.com': 'outlook.com',
+  'outloo.com': 'outlook.com',
+  'outlook.con': 'outlook.com',
+  'yaho.com': 'yahoo.com',
+  'yhoo.com': 'yahoo.com',
+  'yahoo.con': 'yahoo.com',
+  'yaho.com.br': 'yahoo.com.br',
+  'icoud.com': 'icloud.com',
+  'iclod.com': 'icloud.com',
+  'unesc.com': 'unesc.net',
+};
+
+function distanciaLevenshtein(a, b) {
+  const m = a.length;
+  const n = b.length;
+  const dp = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+
+  for (let i = 0; i <= m; i++) dp[i][0] = i;
+  for (let j = 0; j <= n; j++) dp[0][j] = j;
+
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const custo = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + custo
+      );
+    }
+  }
+  return dp[m][n];
+}
+
+// Detecta e sugere correção para erros comuns de digitação de e-mail
+export function analisarEmailDigitado(emailRaw) {
+  const original = String(emailRaw || '').trim();
+  if (!original) {
+    return { valido: true, email: original, sugestao: null, erro: null };
+  }
+
+  const normalizado = original.toLowerCase();
+  const partes = normalizado.split('@');
+
+  if (partes.length !== 2 || !partes[0] || !partes[1] || !partes[1].includes('.')) {
+    return {
+      valido: false,
+      email: original,
+      sugestao: null,
+      erro: 'Digite um endereço de e-mail válido (ex.: nome@dominio.com).',
+    };
+  }
+
+  const [usuario, dominio] = partes;
+
+  if (CORRECOES_DIRETA_DOMINIO[dominio]) {
+    const emailSugerido = `${usuario}@${CORRECOES_DIRETA_DOMINIO[dominio]}`;
+    return {
+      valido: false,
+      email: original,
+      sugestao: emailSugerido,
+      erro: `Possível erro de digitação no domínio. Você quis dizer ${emailSugerido}?`,
+    };
+  }
+
+  if (!DOMINIOS_CORRETOS.includes(dominio)) {
+    let melhorDominio = null;
+    let menorDist = Infinity;
+
+    for (const candidato of DOMINIOS_CORRETOS) {
+      const dist = distanciaLevenshtein(dominio, candidato);
+      if (dist > 0 && dist <= 2 && dist < menorDist) {
+        menorDist = dist;
+        melhorDominio = candidato;
+      }
+    }
+
+    if (melhorDominio) {
+      const emailSugerido = `${usuario}@${melhorDominio}`;
+      return {
+        valido: false,
+        email: original,
+        sugestao: emailSugerido,
+        erro: `Domínio incomum detectado. Você quis dizer ${emailSugerido}?`,
+      };
+    }
+  }
+
+  return { valido: true, email: normalizado, sugestao: null, erro: null };
+}
+
+export async function gerarHashSenha(senha) {
+  const texto = String(senha || '');
+  const encoder = new TextEncoder();
+  const data = encoder.encode(texto);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(hashBuffer))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+export async function enviarEmailConfirmacaoInscricao({ email, nome, inscricoes = [] }) {
+  if (!email) {
+    return { enviado: false, motivo: 'sem_email' };
+  }
+
+  const resumoBancas = inscricoes
+    .map(
+      (i) =>
+        `• ${i.banca_titulo || i.titulo_tcc} (${i.horario_descricao || i.horario_data || 'Horário a confirmar'})`
+    )
+    .join('\n');
+
+  try {
+    const { error } = await supabase.functions.invoke('enviar-confirmacao-inscricao', {
+      body: {
+        to: email,
+        nome,
+        assunto: 'Confirmação de Inscrição — Bancas de TCC',
+        resumoBancas,
+        inscricoes,
+      },
+    });
+
+    if (error) {
+      return { enviado: false, motivo: error.message, resumoBancas };
+    }
+    return { enviado: true, resumoBancas };
+  } catch (err) {
+    return { enviado: false, motivo: err.message, resumoBancas };
+  }
+}
+
 // Calcula se a banca está na trava de 15 minutos entre a 1ª chamada e a abertura da 2ª hora
 export function avaliarTravaSegundaHora(banca, horario = null, agoraMs = Date.now()) {
   const rawData = String(banca?.horario_data || horario?.data || '').trim();
@@ -186,7 +340,6 @@ export async function criarInscricao(body) {
 
     const maxBancas = evento?.max_bancas_por_horario || 2;
 
-    // --- FLUXO APRESENTADOR ---
     if (body.tipo === 'apresentador') {
       const isExterno = body.avaliador2_tipo === 'externo';
 
@@ -198,7 +351,9 @@ export async function criarInscricao(body) {
       }
       if (!isExterno && !body.avaliador2_id) {
         return {
-          data: { error: 'Selecione o Avaliador 2 do curso ou preencha os dados do avaliador externo.' },
+          data: {
+            error: 'Selecione o Avaliador 2 do curso ou preencha os dados do avaliador externo.',
+          },
         };
       }
       if (
@@ -208,7 +363,9 @@ export async function criarInscricao(body) {
           !body.avaliador2_externo_email)
       ) {
         return {
-          data: { error: 'Preencha titulação, nome completo e e-mail do avaliador externo.' },
+          data: {
+            error: 'Preencha titulação, nome completo e e-mail do avaliador externo.',
+          },
         };
       }
 
@@ -339,15 +496,56 @@ export async function criarInscricao(body) {
       return { data: { success: true, inscricao_id: novaInscricao.id, banca_id: novaBanca.id } };
     }
 
-    // --- FLUXO ESPECTADOR (SUPORTA 1 OU VÁRIAS BANCAS) ---
-    if (body.tipo === 'academico' && !body.email) {
+    return await criarInscricaoEspectador(body);
+  } catch (error) {
+    return { data: { error: error.message } };
+  }
+}
+
+// --- FLUXO ESPECTADOR (SUPORTA 1 OU VÁRIAS BANCAS + SENHA + E-MAIL OPCIONAL PARA FAMILIAR) ---
+export async function criarInscricaoEspectador(body) {
+  try {
+    const tipo = body?.tipo || 'academico';
+    const nome = String(body?.nome || '').trim();
+    const emailRaw = String(body?.email || '').trim();
+    const senha = String(body?.senha || body?.password || '').trim();
+
+    if (!nome) {
+      return { data: { error: 'Nome completo é obrigatório.' } };
+    }
+
+    if (tipo === 'academico' && !emailRaw) {
       return { data: { error: 'E-mail é obrigatório para acadêmicos.' } };
     }
 
+    if (emailRaw) {
+      const analiseEmail = analisarEmailDigitado(emailRaw);
+      if (!analiseEmail.valido) {
+        return {
+          data: {
+            error: analiseEmail.erro || 'Verifique o endereço de e-mail informado.',
+            sugestao_email: analiseEmail.sugestao || null,
+          },
+        };
+      }
+    }
+
+    if (!senha || senha.length < 4) {
+      return {
+        data: { error: 'Defina uma senha (mínimo de 4 caracteres) para consultar sua inscrição depois.' },
+      };
+    }
+
+    const { data: eventos } = await supabase.from('configuracao_evento').select('*').limit(1);
+    const evento = eventos?.[0] || null;
+    if (evento && evento.inscricoes_abertas === false) {
+      return { data: { error: 'As inscrições estão encerradas no momento.' } };
+    }
+
     const bancaIds =
-      Array.isArray(body.banca_ids) && body.banca_ids.length > 0
+      Array.isArray(body?.banca_ids) && body.banca_ids.length > 0
         ? body.banca_ids
-        : body.banca_id
+        : body?.banca_id
         ? [body.banca_id]
         : [];
 
@@ -370,10 +568,9 @@ export async function criarInscricao(body) {
       : { data: [] };
     const horarioMap = Object.fromEntries((horariosRel || []).map((h) => [h.id, h]));
 
-    // Bloqueia choque de mesmo dia e horário entre as bancas selecionadas
     const chavesHorario = new Set();
     for (const b of bancasAlvo) {
-      const chave = b.horario_id || `${b.horario_data}_${b.horario_descricao}`;
+      const chave = b.horario_id || `${b.horario_data || ''}_${b.horario_descricao || ''}`;
       if (chavesHorario.has(chave)) {
         return {
           data: {
@@ -385,7 +582,6 @@ export async function criarInscricao(body) {
       chavesHorario.add(chave);
     }
 
-    // Valida trava de 15 minutos da 2ª hora e disponibilidade de vagas
     const agoraMs = Date.now();
     for (const b of bancasAlvo) {
       if (b.status === 'realizada' || b.status === 'cancelada' || b.chamada2_concluida) {
@@ -413,6 +609,9 @@ export async function criarInscricao(body) {
       }
     }
 
+    const senhaHash = await gerarHashSenha(senha);
+    const emailLimpo = emailRaw.toLowerCase();
+
     const registros = bancasAlvo.map((b) => ({
       banca_id: b.id,
       banca_titulo: b.titulo_tcc,
@@ -420,25 +619,43 @@ export async function criarInscricao(body) {
       horario_data: b.horario_data || '',
       sala_nome: b.sala_nome || '',
       orientador_user_id: b.orientador_user_id || null,
-      tipo: body.tipo,
-      nome: body.nome,
-      email: body.email || '',
-      cpf: body.cpf || '',
-      codigo_academico: body.codigo_academico || '',
-      curso: body.curso || 'Psicologia',
-      semestre: body.semestre || '',
-      parentesco: body.parentesco || '',
+      tipo,
+      nome,
+      email: emailLimpo,
+      cpf: body?.cpf || '',
+      codigo_academico: body?.codigo_academico || '',
+      senha_hash: senhaHash,
+      parentesco: body?.parentesco || '',
       etapa_chamada: b.chamada1_concluida ? 2 : 1,
       presente: false,
       inclusao_ultima_hora: false,
-      email_enviado: Boolean(body.email),
-      email_status: body.email ? 'confirmado' : 'sem_email',
+      email_enviado: Boolean(emailLimpo),
+      email_status: emailLimpo ? 'confirmado' : 'sem_email',
     }));
 
-    const { error: insertErr } = await supabase.from('inscricoes').insert(registros);
+    const { data: inseridas, error: insertErr } = await supabase
+      .from('inscricoes')
+      .insert(registros)
+      .select();
+
     if (insertErr) throw insertErr;
 
-    return { data: { success: true, total: registros.length } };
+    const confirmacaoEmail = emailLimpo
+      ? await enviarEmailConfirmacaoInscricao({
+          email: emailLimpo,
+          nome,
+          inscricoes: inseridas || registros,
+        })
+      : { enviado: false, motivo: 'sem_email' };
+
+    return {
+      data: {
+        success: true,
+        total: registros.length,
+        inscricoes: inseridas || registros,
+        email_confirmacao: confirmacaoEmail,
+      },
+    };
   } catch (error) {
     return { data: { error: error.message } };
   }
@@ -453,7 +670,6 @@ export async function consultarInscricao({ codigo, email }) {
     }
 
     let query = supabase.from('inscricoes').select('*');
-
     if (termo.includes('@')) {
       query = query.ilike('email', termo);
     } else {
@@ -461,7 +677,6 @@ export async function consultarInscricao({ codigo, email }) {
     }
 
     const { data: inscricoes, error } = await query;
-
     if (error) throw error;
     if (!inscricoes || inscricoes.length === 0) {
       return { data: { error: 'Nenhuma inscrição encontrada para este código ou e-mail.' } };
@@ -469,6 +684,76 @@ export async function consultarInscricao({ codigo, email }) {
 
     const enriched = await Promise.all(
       inscricoes.map(async (insc) => {
+        const { data: banca } = insc.banca_id
+          ? await supabase.from('bancas').select('*').eq('id', insc.banca_id).maybeSingle()
+          : { data: null };
+
+        return {
+          ...insc,
+          titulo_tcc: insc.titulo_tcc || insc.banca_titulo || banca?.titulo_tcc || '',
+          orientador_nome: insc.orientador_nome || banca?.orientador_nome || '',
+          avaliador1_nome: banca?.avaliador1_nome || '',
+          avaliador2_nome: banca?.avaliador2_nome || '',
+          apresentador_nome: banca?.apresentador_nome || '',
+          horario_descricao: insc.horario_descricao || banca?.horario_descricao || '',
+          horario_data: insc.horario_data || banca?.horario_data || '',
+          sala_nome: insc.sala_nome || banca?.sala_nome || '',
+          status: banca?.status || null,
+        };
+      })
+    );
+
+    return { data: { success: true, inscricoes: enriched } };
+  } catch (error) {
+    return { data: { error: error.message } };
+  }
+}
+
+// Consultar inscrições exigindo E-mail ou Código + Senha
+export async function consultarInscricaoComSenha({ codigo, email, senha }) {
+  try {
+    const identificador = String(email || codigo || '').trim();
+    const senhaInformada = String(senha || '').trim();
+
+    if (!identificador) {
+      return { data: { error: 'Informe seu e-mail ou código do aluno.' } };
+    }
+
+    if (!senhaInformada) {
+      return { data: { error: 'Informe sua senha para consultar a inscrição.' } };
+    }
+
+    let query = supabase.from('inscricoes').select('*');
+    if (identificador.includes('@')) {
+      query = query.ilike('email', identificador);
+    } else {
+      query = query.or(`codigo_academico.ilike.${identificador},email.ilike.${identificador}`);
+    }
+
+    const { data: inscricoes, error } = await query;
+    if (error) throw error;
+
+    if (!inscricoes || inscricoes.length === 0) {
+      return { data: { error: 'Nenhuma inscrição encontrada para este e-mail ou código.' } };
+    }
+
+    const hashInformado = await gerarHashSenha(senhaInformada);
+    const validadas = inscricoes.filter(
+      (i) =>
+        (i.senha_hash && i.senha_hash === hashInformado) ||
+        (i.senha && String(i.senha) === senhaInformada)
+    );
+
+    if (validadas.length === 0) {
+      return {
+        data: {
+          error: 'Senha incorreta ou inscrição sem senha cadastrada. Use "Esqueci minha senha".',
+        },
+      };
+    }
+
+    const enriched = await Promise.all(
+      validadas.map(async (insc) => {
         const { data: banca } = insc.banca_id
           ? await supabase.from('bancas').select('*').eq('id', insc.banca_id).maybeSingle()
           : { data: null };
@@ -585,7 +870,6 @@ export async function confirmarPresenca({ inscricao_id, presente, etapa = 1 }) {
       .update(updates)
       .eq('id', inscricao_id);
 
-    // Fallback caso as colunas presente_chamada1/2 ainda não existam na tabela inscricoes
     if (updErr && /presente_chamada/i.test(updErr.message || '')) {
       const retry = await supabase
         .from('inscricoes')
@@ -646,7 +930,6 @@ export async function finalizarPrimeiraChamada({
     const espectadores = (inscricoes || []).filter((i) => i.tipo !== 'apresentador');
     const usarListaTela = Array.isArray(presentes_ids);
 
-    // Garante que todos os marcados como presentes na tela estejam salvos como presente = true no banco
     if (usarListaTela && presentes_ids.length > 0) {
       let { error: syncErr } = await supabase
         .from('inscricoes')
@@ -1071,6 +1354,129 @@ export async function verificarPrimeiroAcessoProfessor(params) {
         professor,
       },
     };
+  } catch (error) {
+    return { data: { error: error.message } };
+  }
+}
+
+// 16. Solicitar código/token de recuperação de senha para o espectador
+export async function solicitarRecuperacaoSenha({ email, codigo }) {
+  try {
+    const identificador = String(email || codigo || '').trim();
+    if (!identificador) {
+      return { data: { error: 'Informe o e-mail ou código cadastrado na inscrição.' } };
+    }
+
+    let query = supabase.from('inscricoes').select('id, nome, email, codigo_academico');
+    if (identificador.includes('@')) {
+      query = query.ilike('email', identificador);
+    } else {
+      query = query.or(`codigo_academico.ilike.${identificador},email.ilike.${identificador}`);
+    }
+
+    const { data: registros, error } = await query;
+    if (error) throw error;
+
+    if (!registros || registros.length === 0) {
+      return { data: { error: 'Nenhuma inscrição encontrada com esse dado.' } };
+    }
+
+    const tokenRecuperacao = Math.random().toString(36).substring(2, 8).toUpperCase();
+    const expiracao = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    const ids = registros.map((r) => r.id);
+
+    await supabase
+      .from('inscricoes')
+      .update({
+        token_recuperacao: tokenRecuperacao,
+        token_recuperacao_expira: expiracao,
+      })
+      .in('id', ids);
+
+    const destinoEmail = registros.find((r) => r.email)?.email || '';
+
+    if (destinoEmail) {
+      try {
+        await supabase.functions.invoke('enviar-recuperacao-senha', {
+          body: {
+            to: destinoEmail,
+            codigo_recuperacao: tokenRecuperacao,
+            nome: registros[0].nome,
+          },
+        });
+      } catch (_) {
+        // Fallback caso a Edge Function não esteja configurada
+      }
+    }
+
+    return {
+      data: {
+        success: true,
+        email_mascarado: destinoEmail || null,
+        codigo_recuperacao: destinoEmail ? undefined : tokenRecuperacao,
+        mensagem: destinoEmail
+          ? `Código de recuperação gerado para ${destinoEmail}.`
+          : `Código de recuperação gerado: ${tokenRecuperacao}`,
+      },
+    };
+  } catch (error) {
+    return { data: { error: error.message } };
+  }
+}
+
+// 17. Redefinir senha da inscrição usando código de recuperação (ou e-mail/código + nova senha)
+export async function redefinirSenhaInscricao({ email, codigo, token, novaSenha }) {
+  try {
+    const identificador = String(email || codigo || '').trim();
+    const tokenInformado = String(token || '').trim().toUpperCase();
+    const novaSenhaLimpa = String(novaSenha || '').trim();
+
+    if (!identificador || !novaSenhaLimpa || novaSenhaLimpa.length < 4) {
+      return {
+        data: { error: 'Informe o e-mail/código e a nova senha (mínimo de 4 caracteres).' },
+      };
+    }
+
+    let query = supabase.from('inscricoes').select('*');
+    if (identificador.includes('@')) {
+      query = query.ilike('email', identificador);
+    } else {
+      query = query.or(`codigo_academico.ilike.${identificador},email.ilike.${identificador}`);
+    }
+
+    const { data: registros, error } = await query;
+    if (error) throw error;
+
+    if (!registros || registros.length === 0) {
+      return { data: { error: 'Inscrição não encontrada.' } };
+    }
+
+    if (tokenInformado) {
+      const valido = registros.some(
+        (r) =>
+          String(r.token_recuperacao || '').toUpperCase() === tokenInformado &&
+          (!r.token_recuperacao_expira || new Date(r.token_recuperacao_expira) > new Date())
+      );
+      if (!valido) {
+        return { data: { error: 'Código de recuperação inválido ou expirado.' } };
+      }
+    }
+
+    const novoHash = await gerarHashSenha(novaSenhaLimpa);
+    const ids = registros.map((r) => r.id);
+
+    const { error: updErr } = await supabase
+      .from('inscricoes')
+      .update({
+        senha_hash: novoHash,
+        token_recuperacao: null,
+        token_recuperacao_expira: null,
+      })
+      .in('id', ids);
+
+    if (updErr) throw updErr;
+
+    return { data: { success: true, mensagem: 'Senha atualizada com sucesso!' } };
   } catch (error) {
     return { data: { error: error.message } };
   }

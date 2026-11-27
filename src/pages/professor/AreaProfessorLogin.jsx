@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { supabase } from '@/lib/supabase';
 import { verificarPrimeiroAcessoProfessor } from '@/lib/api';
+import { registrarLog } from '@/lib/auditLog';
 import { useAuth } from '@/lib/AuthContext';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -14,7 +15,7 @@ export default function AreaProfessorLogin() {
 
   const [etapa, setEtapa] = useState('email'); // 'email' | 'primeiro_acesso' | 'login'
   const [email, setEmail] = useState('');
-  const [nomeProfessor, setNomeProfessor] = useState('');
+  const [nomeOrientador, setNomeOrientador] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -42,15 +43,20 @@ export default function AreaProfessorLogin() {
       const inativo = Boolean(res.data?.inativo || prof?.ativo === false);
 
       if (!cadastrado) {
-        setErro('E-mail não encontrado no pré-cadastro de professores. Solicite à coordenação o cadastro do seu e-mail.');
+        setErro(
+          'E-mail não encontrado no pré-cadastro de orientadores. Solicite à coordenação o cadastro do seu e-mail.'
+        );
         return;
       }
       if (inativo) {
-        setErro('Seu cadastro de professor está inativo. Entre em contato com a coordenação.');
+        setErro('Seu cadastro de orientador está inativo. Entre em contato com a coordenação.');
         return;
       }
 
-      const nome = res.data?.nome || prof?.nome || 'Professor(a)';
+      const titulacao = String(res.data?.titulacao || prof?.titulacao || '').trim();
+      const nomeBase = res.data?.nome || prof?.nome || 'Orientador(a)';
+      const nomeExibicao = titulacao ? `${titulacao} ${nomeBase}` : nomeBase;
+
       const jaPossuiSenha =
         typeof res.data?.ja_possui_senha === 'boolean'
           ? res.data.ja_possui_senha
@@ -58,7 +64,7 @@ export default function AreaProfessorLogin() {
           ? res.data.ja_cadastrado
           : Boolean(prof?.user_id);
 
-      setNomeProfessor(nome);
+      setNomeOrientador(nomeExibicao);
       setEtapa(jaPossuiSenha ? 'login' : 'primeiro_acesso');
     } catch (err) {
       setErro(err.message || 'Erro ao verificar e-mail.');
@@ -86,7 +92,7 @@ export default function AreaProfessorLogin() {
         email: emailLimpo,
         password,
         options: {
-          data: { full_name: nomeProfessor, role: 'professor' },
+          data: { full_name: nomeOrientador, role: 'professor' },
         },
       });
 
@@ -101,13 +107,27 @@ export default function AreaProfessorLogin() {
         throw error;
       }
 
+      if (data?.user && Array.isArray(data.user.identities) && data.user.identities.length === 0) {
+        setEtapa('login');
+        setPassword('');
+        setConfirmPassword('');
+        setErro('Este e-mail já possui conta cadastrada. Digite sua senha existente para entrar.');
+        return;
+      }
+
       if (!data.session) {
         const { error: loginErr } = await supabase.auth.signInWithPassword({
           email: emailLimpo,
           password,
         });
-        if (loginErr) throw loginErr;
+        if (loginErr) throw new Error('Este e-mail já está em uso com outra senha.');
       }
+
+      await registrarLog({
+        acao: 'PRIMEIRO_ACESSO',
+        entidade: 'ORIENTADOR',
+        detalhes: `Primeiro acesso concluído por ${nomeOrientador} (${emailLimpo})`,
+      });
 
       window.location.href = '/professor';
     } catch (err) {
@@ -122,8 +142,9 @@ export default function AreaProfessorLogin() {
     setErro('');
     setLoading(true);
     try {
+      const emailLimpo = email.trim().toLowerCase();
       const { error } = await supabase.auth.signInWithPassword({
-        email: email.trim().toLowerCase(),
+        email: emailLimpo,
         password,
       });
       if (error) throw new Error('E-mail ou senha incorretos.');
@@ -139,17 +160,20 @@ export default function AreaProfessorLogin() {
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col justify-center px-4 py-12">
       <div className="max-w-md w-full mx-auto">
-        <Link to="/" className="inline-flex items-center gap-1.5 text-sm text-slate-500 hover:text-indigo-600 mb-6">
+        <Link
+          to="/"
+          className="inline-flex items-center gap-1.5 text-sm text-slate-500 hover:text-indigo-600 mb-6"
+        >
           <ArrowLeft className="w-4 h-4" /> Voltar ao início
         </Link>
 
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-8">
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 sm:p-8">
           <div className="flex items-center gap-3 mb-6">
-            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-600 to-violet-600 flex items-center justify-center">
+            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-indigo-600 to-violet-600 flex items-center justify-center shrink-0">
               <GraduationCap className="w-6 h-6 text-white" />
             </div>
             <div>
-              <h1 className="text-xl font-bold text-slate-900">Área do Professor</h1>
+              <h1 className="text-xl font-bold text-slate-900">Área do Orientador</h1>
               <p className="text-xs text-slate-500">Consulta de bancas e chamada em 2 etapas</p>
             </div>
           </div>
@@ -173,13 +197,19 @@ export default function AreaProfessorLogin() {
                     autoFocus
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    placeholder="professor@instituicao.edu.br"
+                    placeholder="orientador@unesc.net"
                     className="pl-9"
                   />
                 </div>
               </div>
               <Button type="submit" disabled={loading} className="w-full">
-                {loading ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Verificando...</> : 'Continuar'}
+                {loading ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Verificando...
+                  </>
+                ) : (
+                  'Continuar'
+                )}
               </Button>
             </form>
           )}
@@ -188,7 +218,7 @@ export default function AreaProfessorLogin() {
             <form onSubmit={handleDefinirSenha} className="space-y-4">
               <div className="p-3 rounded-xl bg-indigo-50 border border-indigo-200 text-xs text-indigo-800 space-y-1">
                 <p className="font-semibold flex items-center gap-1.5">
-                  <KeyRound className="w-4 h-4" /> Primeiro Acesso — Olá, {nomeProfessor}!
+                  <KeyRound className="w-4 h-4 shrink-0" /> Primeiro Acesso — Olá, {nomeOrientador}!
                 </p>
                 <p>Defina uma senha pessoal para acessar suas bancas e realizar as chamadas.</p>
               </div>
@@ -225,12 +255,23 @@ export default function AreaProfessorLogin() {
               </div>
 
               <Button type="submit" disabled={loading} className="w-full">
-                {loading ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Salvando senha...</> : 'Definir Senha e Entrar'}
+                {loading ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Salvando senha...
+                  </>
+                ) : (
+                  'Definir Senha e Entrar'
+                )}
               </Button>
 
               <button
                 type="button"
-                onClick={() => { setEtapa('email'); setPassword(''); setConfirmPassword(''); setErro(''); }}
+                onClick={() => {
+                  setEtapa('email');
+                  setPassword('');
+                  setConfirmPassword('');
+                  setErro('');
+                }}
                 className="w-full text-xs text-slate-500 hover:text-indigo-600"
               >
                 Usar outro e-mail
@@ -240,13 +281,21 @@ export default function AreaProfessorLogin() {
 
           {etapa === 'login' && (
             <form onSubmit={handleEntrar} className="space-y-4">
-              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-700">
-                Olá, <strong>{nomeProfessor}</strong> ({email})
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-700 break-words">
+                Olá, <strong>{nomeOrientador}</strong> ({email})
               </div>
 
               <div>
-                <Label>Sua Senha</Label>
-                <div className="relative mt-1">
+                <div className="flex items-center justify-between mb-1">
+                  <Label>Sua Senha</Label>
+                  <Link
+                    to="/forgot-password"
+                    className="text-xs font-medium text-indigo-600 hover:underline"
+                  >
+                    Esqueci minha senha
+                  </Link>
+                </div>
+                <div className="relative">
                   <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
                   <Input
                     type="password"
@@ -261,12 +310,22 @@ export default function AreaProfessorLogin() {
               </div>
 
               <Button type="submit" disabled={loading} className="w-full">
-                {loading ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Entrando...</> : 'Entrar no Painel'}
+                {loading ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Entrando...
+                  </>
+                ) : (
+                  'Entrar no Painel'
+                )}
               </Button>
 
               <button
                 type="button"
-                onClick={() => { setEtapa('email'); setPassword(''); setErro(''); }}
+                onClick={() => {
+                  setEtapa('email');
+                  setPassword('');
+                  setErro('');
+                }}
                 className="w-full text-xs text-slate-500 hover:text-indigo-600"
               >
                 Trocar e-mail

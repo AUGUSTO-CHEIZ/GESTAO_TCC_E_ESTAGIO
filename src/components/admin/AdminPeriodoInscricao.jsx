@@ -1,16 +1,40 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '@/lib/supabase';
-import { verificarPrazoApresentador } from '@/lib/api';
+import { registrarLog } from '@/lib/auditLog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useToast } from '@/components/ui/use-toast';
-import { CalendarClock, CheckCircle2, Lock, Save, RotateCcw } from 'lucide-react';
+import { CalendarClock, CheckCircle2, Lock, Save, RotateCcw, Clock } from 'lucide-react';
+
+function toLocalDateTimeInput(valor) {
+  if (!valor) return '';
+  const str = String(valor).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+    return `${str}T00:00`;
+  }
+  const d = new Date(str);
+  if (Number.isNaN(d.getTime())) return '';
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const min = String(d.getMinutes()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}T${hh}:${min}`;
+}
+
+function formatarDataHoraBR(localStr) {
+  if (!localStr) return '';
+  const [dataPart, horaPart] = localStr.split('T');
+  const [y, m, d] = (dataPart || '').split('-');
+  if (!y || !m || !d) return localStr;
+  return `${d}/${m}/${y} às ${horaPart || '00:00'}`;
+}
 
 export default function AdminPeriodoInscricao() {
   const [configId, setConfigId] = useState(null);
-  const [inicio, setInicio] = useState('');
-  const [fim, setFim] = useState('');
+  const [abertura, setAbertura] = useState('');
+  const [fechamento, setFechamento] = useState('');
   const [inscricoesAbertas, setInscricoesAbertas] = useState(true);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -27,12 +51,21 @@ export default function AdminPeriodoInscricao() {
       const cfg = data?.[0];
       if (cfg) {
         setConfigId(cfg.id);
-        setInicio(cfg.inscricao_apresentador_inicio || '');
-        setFim(cfg.inscricao_apresentador_fim || '');
+        setAbertura(
+          toLocalDateTimeInput(cfg.inscricao_abertura || cfg.inscricao_apresentador_inicio)
+        );
+        setFechamento(
+          toLocalDateTimeInput(cfg.inscricao_fechamento || cfg.inscricao_apresentador_fim)
+        );
         setInscricoesAbertas(cfg.inscricoes_abertas !== false);
       }
     } catch (err) {
       console.error(err);
+      toast({
+        title: 'Erro ao carregar período',
+        description: err.message,
+        variant: 'destructive',
+      });
     } finally {
       setLoading(false);
     }
@@ -44,10 +77,11 @@ export default function AdminPeriodoInscricao() {
 
   async function handleSave(e) {
     e.preventDefault();
-    if (inicio && fim && inicio > fim) {
+
+    if (abertura && fechamento && new Date(abertura) >= new Date(fechamento)) {
       toast({
         title: 'Datas inválidas',
-        description: 'A data inicial não pode ser maior que a data final.',
+        description: 'A data/hora de abertura deve ser anterior à de encerramento.',
         variant: 'destructive',
       });
       return;
@@ -56,8 +90,10 @@ export default function AdminPeriodoInscricao() {
     setSaving(true);
     try {
       const payload = {
-        inscricao_apresentador_inicio: inicio || null,
-        inscricao_apresentador_fim: fim || null,
+        inscricao_abertura: abertura ? new Date(abertura).toISOString() : null,
+        inscricao_fechamento: fechamento ? new Date(fechamento).toISOString() : null,
+        inscricao_apresentador_inicio: abertura ? abertura.slice(0, 10) : null,
+        inscricao_apresentador_fim: fechamento ? fechamento.slice(0, 10) : null,
         inscricoes_abertas: inscricoesAbertas,
       };
 
@@ -80,9 +116,17 @@ export default function AdminPeriodoInscricao() {
         setConfigId(data.id);
       }
 
+      await registrarLog({
+        acao: 'ATUALIZAR',
+        entidade: 'PERIODO_INSCRICAO',
+        detalhes: `Inscrições ${inscricoesAbertas ? 'ativas' : 'pausadas'} | Abertura: ${
+          abertura ? formatarDataHoraBR(abertura) : 'imediata'
+        } | Encerramento: ${fechamento ? formatarDataHoraBR(fechamento) : 'sem limite'}`,
+      });
+
       toast({
         title: 'Período atualizado!',
-        description: 'As regras de data para apresentadores e espectadores já estão valendo.',
+        description: 'As regras de abertura e encerramento já estão valendo no sistema.',
       });
     } catch (err) {
       toast({
@@ -95,11 +139,51 @@ export default function AdminPeriodoInscricao() {
     }
   }
 
-  const statusAtual = verificarPrazoApresentador({
-    inscricoes_abertas: inscricoesAbertas,
-    inscricao_apresentador_inicio: inicio,
-    inscricao_apresentador_fim: fim,
-  });
+  function calcularStatusAtual() {
+    if (!inscricoesAbertas) {
+      return {
+        aberto: false,
+        titulo: 'Inscrições Pausadas Manualmente',
+        descricao: 'O bloqueio manual está ativado. Nenhum novo agendamento está liberado.',
+      };
+    }
+
+    const agora = new Date();
+    if (abertura) {
+      const dtAbertura = new Date(abertura);
+      if (!Number.isNaN(dtAbertura.getTime()) && agora < dtAbertura) {
+        return {
+          aberto: false,
+          titulo: 'Aguardando Abertura do Prazo',
+          descricao: `As inscrições de apresentadores abrirão em ${formatarDataHoraBR(abertura)}.`,
+        };
+      }
+    }
+
+    if (fechamento) {
+      const dtFechamento = new Date(fechamento);
+      if (!Number.isNaN(dtFechamento.getTime()) && agora > dtFechamento) {
+        return {
+          aberto: false,
+          titulo: 'Prazo de Apresentadores Encerrado (Apenas Espectadores)',
+          descricao: `O agendamento de apresentadores encerrou em ${formatarDataHoraBR(fechamento)}.`,
+        };
+      }
+    }
+
+    return {
+      aberto: true,
+      titulo: 'Inscrições Liberadas Agora',
+      descricao:
+        abertura || fechamento
+          ? `Janela ativa: ${
+              abertura ? formatarDataHoraBR(abertura) : 'início imediato'
+            } até ${fechamento ? formatarDataHoraBR(fechamento) : 'sem data limite'}.`
+          : 'Nenhuma restrição de data definida — apresentadores e espectadores podem se inscrever.',
+    };
+  }
+
+  const statusAtual = calcularStatusAtual();
 
   if (loading) {
     return (
@@ -114,12 +198,12 @@ export default function AdminPeriodoInscricao() {
       <div>
         <h1 className="text-2xl font-bold text-slate-900">Período de Inscrição</h1>
         <p className="text-sm text-slate-500">
-          Defina os dias em que os apresentadores podem escolher horário. Fora desse intervalo, o
-          sistema fica aberto apenas para inscrição de espectadores.
+          Defina a data e o horário de abertura e encerramento para agendamento de apresentadores.
+          Fora desse prazo, apenas espectadores poderão se inscrever nas bancas aprovadas.
         </p>
       </div>
 
-      {/* Cartão de Status Atual */}
+      {/* Cartão de Status em Tempo Real */}
       <div
         className={`rounded-2xl border p-4 flex items-start gap-3 ${
           statusAtual.aberto
@@ -133,58 +217,54 @@ export default function AdminPeriodoInscricao() {
           <Lock className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
         )}
         <div className="text-sm">
-          <p className="font-semibold">
-            {statusAtual.aberto
-              ? 'Apresentadores: Inscrições Liberadas Hoje'
-              : 'Apresentadores: Bloqueado (Apenas Espectadores)'}
-          </p>
-          <p className="text-xs mt-0.5 opacity-90">
-            {statusAtual.aberto
-              ? inicio || fim
-                ? `Janela configurada: ${inicio ? inicio.split('-').reverse().join('/') : 'início imediato'} até ${fim ? fim.split('-').reverse().join('/') : 'sem data limite'}.`
-                : 'Nenhuma restrição de data definida — apresentadores podem escolher horários normalmente.'
-              : statusAtual.motivo}
-          </p>
+          <p className="font-semibold">{statusAtual.titulo}</p>
+          <p className="text-xs mt-0.5 opacity-90">{statusAtual.descricao}</p>
         </div>
       </div>
 
       <form
         onSubmit={handleSave}
-        className="bg-white rounded-2xl border border-slate-200 p-6 space-y-5"
+        className="bg-white rounded-2xl border border-slate-200 p-6 space-y-5 shadow-sm"
       >
         <div className="flex items-center gap-2 text-slate-900 font-semibold border-b border-slate-100 pb-3">
           <CalendarClock className="w-5 h-5 text-indigo-600" />
-          <span>Janela de Escolha de Horários (Apresentadores)</span>
+          <span>Prazo de Abertura e Encerramento</span>
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div>
-            <Label>Data de Início (Apresentadores)</Label>
+          <div className="space-y-1.5">
+            <Label className="flex items-center gap-1.5">
+              <Clock className="w-3.5 h-3.5 text-slate-500" />
+              Abertura das Inscrições
+            </Label>
             <Input
-              type="date"
-              value={inicio}
-              onChange={(e) => setInicio(e.target.value)}
+              type="datetime-local"
+              value={abertura}
+              onChange={(e) => setAbertura(e.target.value)}
             />
-            <p className="text-xs text-slate-400 mt-1">
-              Primeiro dia em que os alunos podem agendar o TCC.
+            <p className="text-xs text-slate-400">
+              Data e hora em que os alunos começam a escolher horários.
             </p>
           </div>
 
-          <div>
-            <Label>Data Final (Apresentadores)</Label>
+          <div className="space-y-1.5">
+            <Label className="flex items-center gap-1.5">
+              <Clock className="w-3.5 h-3.5 text-slate-500" />
+              Encerramento das Inscrições
+            </Label>
             <Input
-              type="date"
-              value={fim}
-              onChange={(e) => setFim(e.target.value)}
+              type="datetime-local"
+              value={fechamento}
+              onChange={(e) => setFechamento(e.target.value)}
             />
-            <p className="text-xs text-slate-400 mt-1">
-              Após este dia, apenas espectadores poderão se inscrever.
+            <p className="text-xs text-slate-400">
+              Após este momento, apenas espectadores podem se inscrever.
             </p>
           </div>
         </div>
 
-        <div className="pt-2 border-t border-slate-100">
-          <label className="flex items-center gap-2.5 cursor-pointer select-none">
+        <div className="pt-3 border-t border-slate-100">
+          <label className="flex items-center gap-3 cursor-pointer select-none">
             <input
               type="checkbox"
               checked={inscricoesAbertas}
@@ -192,7 +272,7 @@ export default function AdminPeriodoInscricao() {
               className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
             />
             <span className="text-sm font-medium text-slate-800">
-              Sistema aberto para inscrições (Apresentadores dentro do prazo e Espectadores)
+              Manter sistema aberto para inscrições (respeitando o prazo acima)
             </span>
           </label>
         </div>
@@ -202,8 +282,8 @@ export default function AdminPeriodoInscricao() {
             type="button"
             variant="outline"
             onClick={() => {
-              setInicio('');
-              setFim('');
+              setAbertura('');
+              setFechamento('');
             }}
             className="gap-2"
           >

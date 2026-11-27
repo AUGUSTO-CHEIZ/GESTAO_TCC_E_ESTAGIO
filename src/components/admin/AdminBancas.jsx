@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import * as XLSX from 'xlsx';
 import { QRCodeCanvas } from 'qrcode.react';
 import { supabase } from '@/lib/supabase';
@@ -18,9 +18,12 @@ import {
   Download,
   X,
   CheckCircle2,
-  RefreshCw,
+  Mail,
+  Search,
 } from 'lucide-react';
 import { useToast } from '@/components/ui/use-toast';
+
+const VAGAS_PADRAO = 55;
 
 const emptyForm = {
   titulo_tcc: '',
@@ -35,7 +38,7 @@ const emptyForm = {
   avaliador2_externo_nome: '',
   avaliador2_externo_email: '',
   status: 'pendente',
-  vagas_espectadores: 30,
+  vagas_espectadores: VAGAS_PADRAO,
 };
 
 const emptyAlunoForm = {
@@ -44,13 +47,6 @@ const emptyAlunoForm = {
   orientador_nome: '',
   titulacao: '',
 };
-
-const STATUS_OPTIONS = [
-  { value: 'pendente', label: 'Pendentes de aprovação' },
-  { value: 'agendada', label: 'Agendada' },
-  { value: 'realizada', label: 'Realizada e aprovada' },
-  { value: 'cancelada', label: 'Cancelada' },
-];
 
 function normalizarChave(str) {
   return String(str || '')
@@ -67,15 +63,6 @@ function limparTexto(val) {
   return s;
 }
 
-function comTimeout(promise, ms = 12000) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('Tempo limite excedido ao carregar dados.')), ms)
-    ),
-  ]);
-}
-
 export default function AdminBancas() {
   const [bancas, setBancas] = useState([]);
   const [horarios, setHorarios] = useState([]);
@@ -83,8 +70,11 @@ export default function AdminBancas() {
   const [professores, setProfessores] = useState([]);
   const [totalPreCadastro, setTotalPreCadastro] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [erroCarregamento, setErroCarregamento] = useState('');
   const [importando, setImportando] = useState(false);
+  const [aprovandoId, setAprovandoId] = useState(null);
+
+  const [busca, setBusca] = useState('');
+  const [filtroStatus, setFiltroStatus] = useState('todos');
 
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState(emptyForm);
@@ -98,72 +88,141 @@ export default function AdminBancas() {
   const fileInputRef = useRef(null);
   const { toast } = useToast();
 
-  const load = useCallback(async (isMountedRef = { current: true }) => {
-    setErroCarregamento('');
-    setLoading(true);
+  async function load() {
     try {
-      const [bRes, hRes, sRes, pRes, preRes] = await comTimeout(
-        Promise.all([
-          supabase.from('bancas').select('*').order('created_at', { ascending: false }),
-          supabase.from('horarios').select('*').eq('ativo', true).order('data', { ascending: true }),
-          supabase.from('salas').select('*').eq('ativa', true).order('nome', { ascending: true }),
-          supabase
-            .from('professores')
-            .select('id, nome, user_id')
-            .eq('ativo', true)
-            .order('nome', { ascending: true }),
-          supabase.from('alunos_precadastro').select('id', { count: 'exact', head: true }),
-        ])
-      );
-
-      if (!isMountedRef.current) return;
-
-      const primeiraFalha = [bRes, hRes, sRes, pRes, preRes].find((r) => r?.error)?.error;
-      if (primeiraFalha) {
-        throw new Error(primeiraFalha.message || 'Falha ao consultar o banco de dados.');
-      }
-
+      const [bRes, hRes, sRes, pRes, preRes] = await Promise.all([
+        supabase.from('bancas').select('*').order('created_at', { ascending: false }),
+        supabase.from('horarios').select('*').eq('ativo', true).order('data', { ascending: true }),
+        supabase.from('salas').select('*').eq('ativa', true).order('nome', { ascending: true }),
+        supabase
+          .from('professores')
+          .select('id, nome, user_id')
+          .eq('ativo', true)
+          .order('nome', { ascending: true }),
+        supabase.from('alunos_precadastro').select('id', { count: 'exact', head: true }),
+      ]);
       setBancas(bRes.data || []);
       setHorarios(hRes.data || []);
       setSalas(sRes.data || []);
       setProfessores(pRes.data || []);
       setTotalPreCadastro(preRes.count || 0);
     } catch (e) {
-      if (!isMountedRef.current) return;
       console.error(e);
-      setErroCarregamento(e.message || 'Não foi possível carregar as bancas.');
     } finally {
-      if (isMountedRef.current) {
-        setLoading(false);
-      }
+      setLoading(false);
     }
-  }, []);
+  }
 
   useEffect(() => {
-    const isMountedRef = { current: true };
-    load(isMountedRef);
-    return () => {
-      isMountedRef.current = false;
-    };
-  }, [load]);
+    load();
+  }, []);
 
   function update(field, value) {
     setForm((f) => ({ ...f, [field]: value }));
   }
 
+  function handleSalaChange(novaSalaId) {
+    const salaSelecionada = salas.find((s) => s.id === novaSalaId);
+    const capacidadeSala =
+      salaSelecionada && Number(salaSelecionada.capacidade) > 0
+        ? Number(salaSelecionada.capacidade)
+        : VAGAS_PADRAO;
+
+    setForm((f) => ({
+      ...f,
+      sala_id: novaSalaId,
+      vagas_espectadores: capacidadeSala,
+    }));
+  }
+
+  async function enviarEmailConfirmacaoApresentador(banca, inscricaoApresentador) {
+    const destinatario =
+      limparTexto(inscricaoApresentador?.email) || limparTexto(banca?.apresentador_email);
+
+    if (!destinatario) {
+      return { enviado: false, motivo: 'Apresentador sem e-mail cadastrado na inscrição.' };
+    }
+
+    const nomeApresentador =
+      limparTexto(inscricaoApresentador?.nome) || limparTexto(banca.apresentador_nome) || 'Acadêmico(a)';
+
+    const assunto = `Banca de TCC Aprovada - ${banca.titulo_tcc}`;
+    const mensagem = `Olá, ${nomeApresentador}! Sua banca de TCC "${banca.titulo_tcc}" foi aprovada pela coordenação. Data/Horário: ${banca.horario_descricao || 'A definir'} | Sala: ${banca.sala_nome || 'A definir'}.`;
+
+    try {
+      const { error: fnError } = await supabase.functions.invoke('enviar-email-confirmacao', {
+        body: {
+          to: destinatario,
+          email: destinatario,
+          nome: nomeApresentador,
+          subject: assunto,
+          mensagem,
+          banca_id: banca.id,
+          titulo_tcc: banca.titulo_tcc,
+          horario_descricao: banca.horario_descricao || '',
+          sala_nome: banca.sala_nome || '',
+          tipo: 'aprovacao_banca',
+        },
+      });
+
+      if (inscricaoApresentador?.id) {
+        await supabase
+          .from('inscricoes')
+          .update({
+            email_enviado: !fnError,
+            email_status: fnError ? 'pendente_envio' : 'confirmado',
+          })
+          .eq('id', inscricaoApresentador.id);
+      }
+
+      if (fnError) {
+        return { enviado: false, email: destinatario, motivo: fnError.message };
+      }
+
+      return { enviado: true, email: destinatario };
+    } catch (err) {
+      return { enviado: false, email: destinatario, motivo: err.message };
+    }
+  }
+
   async function handleAprovarBanca(banca) {
+    setAprovandoId(banca.id);
     try {
       const { error } = await supabase
         .from('bancas')
-        .update({ status: 'agendada' })
+        .update({ status: 'aprovada' })
         .eq('id', banca.id);
 
       if (error) throw error;
 
-      toast({
-        title: 'Banca Agendada / Aprovada!',
-        description: 'Esta banca já está liberada para inscrição de espectadores na tela inicial.',
-      });
+      const { data: inscricaoApresentador } = await supabase
+        .from('inscricoes')
+        .select('*')
+        .eq('banca_id', banca.id)
+        .eq('tipo', 'apresentador')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      const resultadoEmail = await enviarEmailConfirmacaoApresentador(banca, inscricaoApresentador);
+
+      if (resultadoEmail.enviado) {
+        toast({
+          title: 'TCC Aprovado e E-mail Enviado!',
+          description: `Banca liberada e confirmação enviada para ${resultadoEmail.email}.`,
+        });
+      } else if (resultadoEmail.email) {
+        toast({
+          title: 'TCC Aprovado!',
+          description: `Banca liberada para espectadores. E-mail registrado para ${resultadoEmail.email}.`,
+        });
+      } else {
+        toast({
+          title: 'TCC Aprovado!',
+          description: 'Esta banca já está liberada para inscrição de espectadores.',
+        });
+      }
+
       load();
     } catch (err) {
       toast({
@@ -171,6 +230,8 @@ export default function AdminBancas() {
         description: err.message,
         variant: 'destructive',
       });
+    } finally {
+      setAprovandoId(null);
     }
   }
 
@@ -181,10 +242,10 @@ export default function AdminBancas() {
     const orientador = alunoForm.orientador_nome.trim();
     const titulacao = alunoForm.titulacao.trim();
 
-    if (!codigo || !nome || !orientador) {
+    if (!codigo || !nome) {
       toast({
         title: 'Campos obrigatórios',
-        description: 'Preencha código do aluno, nome completo e orientador.',
+        description: 'Informe o código do aluno e o nome completo.',
         variant: 'destructive',
       });
       return;
@@ -201,19 +262,18 @@ export default function AdminBancas() {
         },
         { onConflict: 'codigo_aluno' }
       );
-
       if (error) throw error;
 
       toast({
-        title: 'Aluno adicionado!',
-        description: `${nome} (${codigo}) salvo no pré-cadastro sem alterar os registros existentes.`,
+        title: 'Aluno salvo no pré-cadastro!',
+        description: `${nome} (${codigo}) já pode realizar a inscrição.`,
       });
       setAlunoForm(emptyAlunoForm);
       setShowAlunoModal(false);
       load();
     } catch (err) {
       toast({
-        title: 'Erro ao adicionar aluno',
+        title: 'Erro ao cadastrar aluno',
         description: err.message,
         variant: 'destructive',
       });
@@ -235,68 +295,45 @@ export default function AdminBancas() {
       const registros = linhas
         .map((row) => {
           const norm = Object.fromEntries(
-            Object.entries(row).map(([k, v]) => [normalizarChave(k), limparTexto(v)])
+            Object.entries(row).map(([k, v]) => [normalizarChave(k), String(v).trim()])
           );
-
-          const codigoAluno =
-            norm['codigo do aluno'] ||
-            norm['codigo_aluno'] ||
-            norm['cd_pessoa'] ||
-            norm['cd pessoa'] ||
-            norm['codigo'] ||
-            norm['matricula'] ||
-            '';
-
-          const nomeCompleto =
-            norm['nome completo'] ||
-            norm['nome_completo'] ||
-            norm['nm_pessoa'] ||
-            norm['nm pessoa'] ||
-            norm['nome'] ||
-            norm['aluno'] ||
-            '';
-
-          const orientadorNome =
-            norm['orientador(a)'] ||
-            norm['orientador'] ||
-            norm['orientador_nome'] ||
-            norm['professor orientador'] ||
-            '';
-
-          const titulacao =
-            norm['titulacao'] ||
-            norm['titulacao do avaliador'] ||
-            norm['titulo'] ||
-            '';
-
           return {
-            codigo_aluno: codigoAluno,
-            nome_completo: nomeCompleto,
-            orientador_nome: orientadorNome,
-            titulacao,
+            codigo_aluno:
+              norm['codigo do aluno'] ||
+              norm['codigo_aluno'] ||
+              norm['codigo'] ||
+              norm['matricula'] ||
+              '',
+            nome_completo:
+              norm['nome completo'] ||
+              norm['nome_completo'] ||
+              norm['nome'] ||
+              norm['aluno'] ||
+              '',
+            orientador_nome:
+              norm['orientador'] ||
+              norm['orientador_nome'] ||
+              norm['professor orientador'] ||
+              '',
+            titulacao: norm['titulacao'] || norm['titulo'] || '',
           };
         })
-        .filter((r) => r.codigo_aluno && r.nome_completo && r.orientador_nome);
+        .filter((r) => r.codigo_aluno && r.nome_completo);
 
       if (registros.length === 0) {
         throw new Error(
-          'Nenhuma linha válida encontrada. Verifique as colunas de código, nome completo e orientador.'
+          'Nenhuma linha válida encontrada. Verifique as colunas: Código do aluno, Nome completo, Orientador e Titulação.'
         );
       }
 
-      const unicosPorCodigo = Array.from(
-        new Map(registros.map((item) => [item.codigo_aluno.toLowerCase(), item])).values()
-      );
-
       const { error } = await supabase
         .from('alunos_precadastro')
-        .upsert(unicosPorCodigo, { onConflict: 'codigo_aluno' });
-
+        .upsert(registros, { onConflict: 'codigo_aluno' });
       if (error) throw error;
 
       toast({
         title: 'Planilha importada!',
-        description: `${unicosPorCodigo.length} aluno(s) sincronizado(s) sem apagar os anteriores.`,
+        description: `${registros.length} aluno(s) sincronizado(s) no pré-cadastro.`,
       });
       load();
     } catch (err) {
@@ -318,21 +355,25 @@ export default function AdminBancas() {
       const salaObj = salas.find((s) => s.id === form.sala_id);
       const orientadorObj = professores.find((p) => p.id === form.orientador_id);
       const avaliador1Obj = professores.find((p) => p.id === form.avaliador1_id);
-      const avaliador2CursoObj = professores.find((p) => p.id === form.avaliador2_id);
+      const avaliador2Obj =
+        form.avaliador2_tipo === 'curso'
+          ? professores.find((p) => p.id === form.avaliador2_id)
+          : null;
 
       const isExterno = form.avaliador2_tipo === 'externo';
-      if (
-        isExterno &&
-        (!form.avaliador2_externo_titulacao.trim() ||
-          !form.avaliador2_externo_nome.trim() ||
-          !form.avaliador2_externo_email.trim())
-      ) {
-        throw new Error('Preencha titulação, nome completo e e-mail do avaliador externo.');
-      }
+      const nomeAvaliador2Externo = [
+        limparTexto(form.avaliador2_externo_titulacao),
+        limparTexto(form.avaliador2_externo_nome),
+      ]
+        .filter(Boolean)
+        .join(' ');
 
-      const avaliador2Nome = isExterno
-        ? `${form.avaliador2_externo_titulacao.trim()} ${form.avaliador2_externo_nome.trim()}`.trim()
-        : avaliador2CursoObj?.nome || '';
+      const vagasFinal =
+        Number.isFinite(Number(form.vagas_espectadores)) && Number(form.vagas_espectadores) >= 0
+          ? Number(form.vagas_espectadores)
+          : salaObj && Number(salaObj.capacidade) > 0
+            ? Number(salaObj.capacidade)
+            : VAGAS_PADRAO;
 
       const payload = {
         titulo_tcc: form.titulo_tcc.trim(),
@@ -340,30 +381,35 @@ export default function AdminBancas() {
         horario_id: form.horario_id || null,
         sala_id: form.sala_id || null,
         orientador_id: form.orientador_id || null,
-        orientador_nome: orientadorObj?.nome || '',
+        orientador_nome: orientadorObj ? orientadorObj.nome : '',
         orientador_user_id: orientadorObj?.user_id || null,
         avaliador1_id: form.avaliador1_id || null,
-        avaliador1_nome: avaliador1Obj?.nome || '',
-        avaliador2_tipo: isExterno ? 'externo' : 'curso',
+        avaliador1_nome: avaliador1Obj ? avaliador1Obj.nome : '',
+        avaliador2_tipo: form.avaliador2_tipo || 'curso',
         avaliador2_id: isExterno ? null : form.avaliador2_id || null,
-        avaliador2_nome: avaliador2Nome,
-        avaliador2_externo_titulacao: isExterno ? form.avaliador2_externo_titulacao.trim() : null,
-        avaliador2_externo_nome: isExterno ? form.avaliador2_externo_nome.trim() : null,
-        avaliador2_externo_email: isExterno ? form.avaliador2_externo_email.trim() : null,
-        status: form.status,
-        vagas_espectadores: parseInt(form.vagas_espectadores, 10) || 30,
+        avaliador2_nome: isExterno
+          ? nomeAvaliador2Externo
+          : avaliador2Obj
+            ? avaliador2Obj.nome
+            : '',
+        avaliador2_externo_titulacao: isExterno
+          ? limparTexto(form.avaliador2_externo_titulacao)
+          : '',
+        avaliador2_externo_nome: isExterno ? limparTexto(form.avaliador2_externo_nome) : '',
+        avaliador2_externo_email: isExterno ? limparTexto(form.avaliador2_externo_email) : '',
         horario_descricao: horarioObj
           ? horarioObj.descricao ||
             `${horarioObj.data} • ${horarioObj.hora_inicio?.slice(0, 5)} às ${horarioObj.hora_fim?.slice(0, 5)}`
           : '',
         horario_data: horarioObj ? horarioObj.data : '',
         sala_nome: salaObj ? salaObj.nome : '',
+        status: form.status,
+        vagas_espectadores: vagasFinal,
       };
 
       const { error } = editId
         ? await supabase.from('bancas').update(payload).eq('id', editId)
         : await supabase.from('bancas').insert(payload);
-
       if (error) throw error;
 
       toast({ title: editId ? 'Banca atualizada' : 'Banca criada' });
@@ -378,14 +424,13 @@ export default function AdminBancas() {
 
   async function handleDelete(id) {
     if (!confirm('Remover banca?')) return;
-    try {
-      const { error } = await supabase.from('bancas').delete().eq('id', id);
-      if (error) throw error;
-      toast({ title: 'Banca removida' });
-      load();
-    } catch (err) {
-      toast({ title: 'Erro', description: err.message, variant: 'destructive' });
+    const { error } = await supabase.from('bancas').delete().eq('id', id);
+    if (error) {
+      toast({ title: 'Erro', description: error.message, variant: 'destructive' });
+      return;
     }
+    toast({ title: 'Banca removida' });
+    load();
   }
 
   function baixarQrCode() {
@@ -399,15 +444,26 @@ export default function AdminBancas() {
 
   const qrUrl = qrBanca ? `${window.location.origin}/inscricao/espectador?banca=${qrBanca.id}` : '';
 
+  const bancasFiltradas = bancas.filter((b) => {
+    const matchStatus = filtroStatus === 'todos' || b.status === filtroStatus;
+    const termo = busca.toLowerCase().trim();
+    const matchBusca =
+      !termo ||
+      b.titulo_tcc?.toLowerCase().includes(termo) ||
+      b.apresentador_nome?.toLowerCase().includes(termo) ||
+      b.orientador_nome?.toLowerCase().includes(termo) ||
+      b.sala_nome?.toLowerCase().includes(termo);
+    return matchStatus && matchBusca;
+  });
+
+  const salaAtualForm = salas.find((s) => s.id === form.sala_id);
+
   return (
     <div>
       <div className="flex flex-wrap justify-between items-center gap-3 mb-6">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Bancas</h1>
-          <p className="text-xs text-slate-500">
-            {totalPreCadastro} aluno(s) no pré-cadastro • Aprove os TCCs para liberá-los aos
-            espectadores
-          </p>
+          <p className="text-xs text-slate-500">{totalPreCadastro} aluno(s) no pré-cadastro</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <input
@@ -418,18 +474,6 @@ export default function AdminBancas() {
             className="hidden"
           />
           <Button
-            type="button"
-            variant="outline"
-            onClick={() => {
-              setAlunoForm(emptyAlunoForm);
-              setShowAlunoModal(true);
-            }}
-          >
-            <UserPlus className="w-4 h-4 mr-2" />
-            Adicionar Aluno
-          </Button>
-          <Button
-            type="button"
             variant="outline"
             disabled={importando}
             onClick={() => fileInputRef.current?.click()}
@@ -438,7 +482,15 @@ export default function AdminBancas() {
             {importando ? 'Importando...' : 'Importar Alunos (Excel)'}
           </Button>
           <Button
-            type="button"
+            variant="outline"
+            onClick={() => {
+              setAlunoForm(emptyAlunoForm);
+              setShowAlunoModal(true);
+            }}
+          >
+            <UserPlus className="w-4 h-4 mr-2" /> Cadastrar Aluno
+          </Button>
+          <Button
             onClick={() => {
               setForm(emptyForm);
               setEditId(null);
@@ -447,6 +499,42 @@ export default function AdminBancas() {
           >
             <Plus className="w-4 h-4 mr-2" /> Nova Banca
           </Button>
+        </div>
+      </div>
+
+      {/* Filtros e Busca */}
+      <div className="flex flex-col sm:flex-row gap-3 mb-6">
+        <div className="relative flex-1">
+          <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+          <Input
+            value={busca}
+            onChange={(e) => setBusca(e.target.value)}
+            placeholder="Buscar por título, apresentador, orientador ou sala..."
+            className="pl-9 bg-white"
+          />
+        </div>
+        <div className="flex gap-1.5 flex-wrap">
+          {[
+            { key: 'todos', label: 'Todas' },
+            { key: 'pendente', label: 'Pendentes' },
+            { key: 'aprovada', label: 'Aprovadas' },
+            { key: 'agendada', label: 'Agendadas' },
+            { key: 'realizada', label: 'Realizadas' },
+            { key: 'cancelada', label: 'Canceladas' },
+          ].map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setFiltroStatus(tab.key)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+                filtroStatus === tab.key
+                  ? 'bg-indigo-600 text-white border-indigo-600'
+                  : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+              }`}
+            >
+              {tab.label}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -479,13 +567,12 @@ export default function AdminBancas() {
               <select
                 value={form.horario_id}
                 onChange={(e) => update('horario_id', e.target.value)}
-                className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
               >
                 <option value="">Selecionar...</option>
                 {horarios.map((h) => (
                   <option key={h.id} value={h.id}>
-                    {h.descricao ||
-                      `${h.data} • ${h.hora_inicio?.slice(0, 5)} às ${h.hora_fim?.slice(0, 5)}`}
+                    {h.data} • {h.hora_inicio?.slice(0, 5)} às {h.hora_fim?.slice(0, 5)}
                   </option>
                 ))}
               </select>
@@ -495,13 +582,13 @@ export default function AdminBancas() {
               <Label>Sala</Label>
               <select
                 value={form.sala_id}
-                onChange={(e) => update('sala_id', e.target.value)}
-                className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                onChange={(e) => handleSalaChange(e.target.value)}
+                className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
               >
-                <option value="">Selecionar...</option>
+                <option value="">Selecionar (padrão {VAGAS_PADRAO} vagas)...</option>
                 {salas.map((s) => (
                   <option key={s.id} value={s.id}>
-                    {s.nome}
+                    {s.nome} {s.capacidade ? `(Cap. ${s.capacidade} vagas)` : ''}
                   </option>
                 ))}
               </select>
@@ -517,7 +604,7 @@ export default function AdminBancas() {
             </div>
 
             <div>
-              <Label>Avaliador 1 (Professor do Curso) *</Label>
+              <Label>Avaliador 1</Label>
               <ProfessorSelector
                 value={form.avaliador1_id}
                 onChange={(id) => update('avaliador1_id', id)}
@@ -530,49 +617,47 @@ export default function AdminBancas() {
               <select
                 value={form.avaliador2_tipo}
                 onChange={(e) => update('avaliador2_tipo', e.target.value)}
-                className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
               >
-                <option value="curso">Avaliador / Professor do Curso</option>
+                <option value="curso">Professor do Curso</option>
                 <option value="externo">Avaliador Externo</option>
               </select>
             </div>
 
-            {form.avaliador2_tipo === 'curso' ? (
+            {form.avaliador2_tipo === 'externo' ? (
+              <>
+                <div>
+                  <Label>Titulação (Avaliador Externo)</Label>
+                  <Input
+                    placeholder="Ex: Prof. Dr., Me., Esp."
+                    value={form.avaliador2_externo_titulacao}
+                    onChange={(e) => update('avaliador2_externo_titulacao', e.target.value)}
+                  />
+                </div>
+                <div>
+                  <Label>Nome Completo (Avaliador Externo)</Label>
+                  <Input
+                    value={form.avaliador2_externo_nome}
+                    onChange={(e) => update('avaliador2_externo_nome', e.target.value)}
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <Label>E-mail (Avaliador Externo)</Label>
+                  <Input
+                    type="email"
+                    value={form.avaliador2_externo_email}
+                    onChange={(e) => update('avaliador2_externo_email', e.target.value)}
+                  />
+                </div>
+              </>
+            ) : (
               <div>
-                <Label>Avaliador 2 (Professor do Curso)</Label>
+                <Label>Avaliador 2</Label>
                 <ProfessorSelector
                   value={form.avaliador2_id}
                   onChange={(id) => update('avaliador2_id', id)}
                   excludeIds={[form.orientador_id, form.avaliador1_id].filter(Boolean)}
                 />
-              </div>
-            ) : (
-              <div className="sm:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-3 bg-slate-50 p-4 rounded-xl border border-slate-200">
-                <div>
-                  <Label>Titulação do Avaliador *</Label>
-                  <Input
-                    value={form.avaliador2_externo_titulacao}
-                    onChange={(e) => update('avaliador2_externo_titulacao', e.target.value)}
-                    placeholder="Ex: Dr., Dra., Me., Ma."
-                  />
-                </div>
-                <div>
-                  <Label>Nome completo do Avaliador *</Label>
-                  <Input
-                    value={form.avaliador2_externo_nome}
-                    onChange={(e) => update('avaliador2_externo_nome', e.target.value)}
-                    placeholder="Nome completo"
-                  />
-                </div>
-                <div>
-                  <Label>E-mail do Avaliador *</Label>
-                  <Input
-                    type="email"
-                    value={form.avaliador2_externo_email}
-                    onChange={(e) => update('avaliador2_externo_email', e.target.value)}
-                    placeholder="avaliador@exemplo.com"
-                  />
-                </div>
               </div>
             )}
 
@@ -581,11 +666,11 @@ export default function AdminBancas() {
               <select
                 value={form.status}
                 onChange={(e) => update('status', e.target.value)}
-                className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm"
               >
-                {STATUS_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
+                {['pendente', 'aprovada', 'agendada', 'realizada', 'cancelada'].map((s) => (
+                  <option key={s} value={s}>
+                    {s}
                   </option>
                 ))}
               </select>
@@ -596,9 +681,19 @@ export default function AdminBancas() {
               <Input
                 type="number"
                 value={form.vagas_espectadores}
-                onChange={(e) => update('vagas_espectadores', parseInt(e.target.value, 10) || 0)}
+                onChange={(e) =>
+                  update(
+                    'vagas_espectadores',
+                    e.target.value === '' ? '' : parseInt(e.target.value, 10)
+                  )
+                }
                 min={0}
               />
+              <p className="text-[11px] text-slate-400 mt-1">
+                {salaAtualForm?.capacidade
+                  ? `Capacidade máxima da sala ${salaAtualForm.nome}: ${salaAtualForm.capacidade} vagas.`
+                  : `Padrão de ${VAGAS_PADRAO} vagas (ajusta automaticamente ao escolher uma sala).`}
+              </p>
             </div>
 
             <div className="sm:col-span-2 flex gap-2 justify-end">
@@ -615,66 +710,70 @@ export default function AdminBancas() {
         <div className="flex justify-center py-12">
           <div className="w-8 h-8 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
         </div>
-      ) : erroCarregamento ? (
-        <div className="bg-white rounded-xl border border-red-200 p-8 text-center space-y-3">
-          <p className="text-sm font-medium text-red-700">{erroCarregamento}</p>
-          <Button type="button" variant="outline" onClick={() => load()} className="gap-2">
-            <RefreshCw className="w-4 h-4" /> Tentar novamente
-          </Button>
+      ) : bancasFiltradas.length === 0 ? (
+        <div className="bg-white rounded-xl border border-slate-200 p-10 text-center text-slate-500">
+          Nenhuma banca encontrada com os filtros atuais.
         </div>
       ) : (
         <div className="space-y-3">
-          {bancas.map((b) => (
+          {bancasFiltradas.map((b) => (
             <div
               key={b.id}
-              className="bg-white rounded-xl border border-slate-200 p-5 flex flex-wrap justify-between items-start gap-4"
+              className="bg-white rounded-xl border border-slate-200 p-5 flex flex-col sm:flex-row justify-between items-start gap-4"
             >
-              <div className="flex-1 min-w-[240px]">
-                <div className="flex flex-wrap items-center gap-2 mb-1">
+              <div className="flex-1">
+                <div className="flex flex-wrap items-center gap-3 mb-1">
                   <h3 className="font-semibold text-slate-900">{b.titulo_tcc}</h3>
-                  {b.status === 'aprovada' ? (
-                    <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-100 text-emerald-700">
-                      <CheckCircle2 className="w-3.5 h-3.5" /> Aprovada
-                    </span>
-                  ) : (
-                    <StatusBadge status={b.status} />
-                  )}
+                  <StatusBadge status={b.status} />
                 </div>
                 <p className="text-sm text-slate-600">
-                  {b.apresentador_nome} {b.sala_nome ? `• ${b.sala_nome}` : ''}
+                  {b.apresentador_nome} {b.sala_nome ? `• ${b.sala_nome}` : ''} •{' '}
+                  <span className="text-slate-500">
+                    {b.vagas_espectadores ?? VAGAS_PADRAO} vagas
+                  </span>
                 </p>
                 <p className="text-xs text-slate-400 mt-1">
                   {b.horario_descricao}
-                  {b.orientador_nome ? ` • Orientador: ${b.orientador_nome}` : ''}
-                  {b.avaliador2_nome ? ` • Avaliador 2: ${b.avaliador2_nome}` : ''}
+                  {b.orientador_nome ? ` • Orientador(a): ${b.orientador_nome}` : ''}
+                  {b.avaliador2_tipo === 'externo' && b.avaliador2_nome
+                    ? ` • Avaliador Ext.: ${b.avaliador2_nome}`
+                    : ''}
                 </p>
               </div>
 
-              <div className="flex items-center gap-1.5">
+              <div className="flex flex-wrap items-center gap-1.5 self-end sm:self-start">
                 {b.status === 'pendente' && (
                   <Button
-                    type="button"
                     size="sm"
                     onClick={() => handleAprovarBanca(b)}
-                    className="bg-emerald-600 hover:bg-emerald-700 text-white gap-1.5 mr-1"
+                    disabled={aprovandoId === b.id}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white gap-1.5"
+                    title="Aprovar banca e enviar e-mail de confirmação ao apresentador"
                   >
-                    <CheckCircle2 className="w-4 h-4" /> Aprovar TCC
+                    <CheckCircle2 className="w-4 h-4" />
+                    {aprovandoId === b.id ? 'Aprovando...' : 'Aprovar e Notificar'}
+                    <Mail className="w-3.5 h-3.5 opacity-80" />
                   </Button>
                 )}
 
                 <button
-                  type="button"
                   onClick={() => setQrBanca(b)}
                   title="Gerar QR Code"
                   className="p-2 text-slate-500 hover:text-indigo-600 rounded-lg hover:bg-indigo-50"
                 >
                   <QrCode className="w-4 h-4" />
                 </button>
+
                 <button
-                  type="button"
                   onClick={() => {
+                    const salaVinculada = salas.find((s) => s.id === b.sala_id);
+                    const vagasIniciais =
+                      b.vagas_espectadores !== null && b.vagas_espectadores !== undefined
+                        ? b.vagas_espectadores
+                        : salaVinculada?.capacidade || VAGAS_PADRAO;
+
                     setForm({
-                      titulo_tcc: b.titulo_tcc,
+                      titulo_tcc: b.titulo_tcc || '',
                       apresentador_nome: b.apresentador_nome || '',
                       horario_id: b.horario_id || '',
                       sala_id: b.sala_id || '',
@@ -685,19 +784,21 @@ export default function AdminBancas() {
                       avaliador2_externo_titulacao: b.avaliador2_externo_titulacao || '',
                       avaliador2_externo_nome: b.avaliador2_externo_nome || '',
                       avaliador2_externo_email: b.avaliador2_externo_email || '',
-                      status: b.status,
-                      vagas_espectadores: b.vagas_espectadores || 30,
+                      status: b.status || 'pendente',
+                      vagas_espectadores: vagasIniciais,
                     });
                     setEditId(b.id);
                     setShowForm(true);
                   }}
+                  title="Editar banca"
                   className="p-2 text-slate-400 hover:text-indigo-600"
                 >
                   <Pencil className="w-4 h-4" />
                 </button>
+
                 <button
-                  type="button"
                   onClick={() => handleDelete(b.id)}
+                  title="Remover banca"
                   className="p-2 text-slate-400 hover:text-red-600"
                 >
                   <Trash2 className="w-4 h-4" />
@@ -708,7 +809,7 @@ export default function AdminBancas() {
         </div>
       )}
 
-      {/* Modal: Adicionar Aluno Avulso ao Pré-cadastro */}
+      {/* Modal Cadastro Avulso de Aluno */}
       {showAlunoModal && (
         <div
           className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
@@ -719,18 +820,14 @@ export default function AdminBancas() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex justify-between items-center">
-              <h3 className="font-bold text-slate-900">Adicionar Aluno ao Pré-cadastro</h3>
+              <h3 className="font-bold text-slate-900">Cadastrar Aluno no Pré-Cadastro</h3>
               <button
-                type="button"
                 onClick={() => setShowAlunoModal(false)}
                 className="text-slate-400 hover:text-slate-600"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <p className="text-xs text-slate-500">
-              Adiciona este aluno sem substituir ou apagar os alunos já importados via Excel.
-            </p>
             <form onSubmit={handleSalvarAlunoAvulso} className="space-y-3">
               <div>
                 <Label>Código do Aluno *</Label>
@@ -739,7 +836,6 @@ export default function AdminBancas() {
                   onChange={(e) =>
                     setAlunoForm((f) => ({ ...f, codigo_aluno: e.target.value }))
                   }
-                  placeholder="Ex: 123456"
                   required
                 />
               </div>
@@ -750,36 +846,26 @@ export default function AdminBancas() {
                   onChange={(e) =>
                     setAlunoForm((f) => ({ ...f, nome_completo: e.target.value }))
                   }
-                  placeholder="Nome completo do aluno"
                   required
                 />
               </div>
               <div>
-                <Label>Professor(a) Orientador(a) *</Label>
-                <select
+                <Label>Orientador</Label>
+                <Input
                   value={alunoForm.orientador_nome}
                   onChange={(e) =>
                     setAlunoForm((f) => ({ ...f, orientador_nome: e.target.value }))
                   }
-                  required
-                  className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                >
-                  <option value="">Selecione o orientador...</option>
-                  {professores.map((p) => (
-                    <option key={p.id} value={p.nome}>
-                      {p.nome}
-                    </option>
-                  ))}
-                </select>
+                />
               </div>
               <div>
-                <Label>Titulação (opcional)</Label>
+                <Label>Titulação do Orientador</Label>
                 <Input
+                  placeholder="Ex: Prof. Dr., Me., Esp."
                   value={alunoForm.titulacao}
                   onChange={(e) =>
                     setAlunoForm((f) => ({ ...f, titulacao: e.target.value }))
                   }
-                  placeholder="Ex: Mestrado, Doutorado..."
                 />
               </div>
               <div className="flex justify-end gap-2 pt-2">
@@ -799,7 +885,7 @@ export default function AdminBancas() {
         </div>
       )}
 
-      {/* Modal: QR Code da Banca */}
+      {/* Modal QR Code */}
       {qrBanca && (
         <div
           className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
@@ -812,7 +898,6 @@ export default function AdminBancas() {
             <div className="flex justify-between items-center">
               <h3 className="font-bold text-slate-900">QR Code da Banca</h3>
               <button
-                type="button"
                 onClick={() => setQrBanca(null)}
                 className="text-slate-400 hover:text-slate-600"
               >
@@ -826,7 +911,7 @@ export default function AdminBancas() {
               <QRCodeCanvas id="qr-banca-canvas" value={qrUrl} size={210} includeMargin />
             </div>
             <p className="text-[11px] text-slate-400 break-all">{qrUrl}</p>
-            <Button type="button" onClick={baixarQrCode} className="w-full gap-2">
+            <Button onClick={baixarQrCode} className="w-full gap-2">
               <Download className="w-4 h-4" /> Baixar QR Code (PNG)
             </Button>
           </div>

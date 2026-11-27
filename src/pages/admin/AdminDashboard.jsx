@@ -10,6 +10,7 @@ import AdminPeriodoInscricao from '@/components/admin/AdminPeriodoInscricao';
 import AdminSalas from '@/components/admin/AdminSalas';
 import AdminInscricoes from '@/components/admin/AdminInscricoes';
 import AdminHistoricoSemestres from '@/components/admin/AdminHistoricoSemestres';
+import AdminLogs from '@/components/admin/AdminLogs';
 import AdminConfiguracoes from '@/components/admin/AdminConfiguracoes';
 import {
   LayoutDashboard,
@@ -20,6 +21,7 @@ import {
   DoorOpen,
   ClipboardList,
   Archive,
+  ShieldCheck,
   Settings,
   LogOut,
   GraduationCap,
@@ -46,25 +48,28 @@ export default function AdminDashboard() {
   }, [toast]);
 
   const tabs = [
-    { id: 'overview', label: 'Painel', icon: LayoutDashboard },
-    { id: 'professores', label: 'Professores', icon: Users },
-    { id: 'bancas', label: 'Bancas', icon: FileText },
+    { id: 'overview', label: 'Bancas', icon: LayoutDashboard },
+    { id: 'professores', label: 'Orientadores', icon: Users },
+    { id: 'bancas', label: 'Alunos', icon: FileText },
     { id: 'horarios', label: 'Horários', icon: Calendar },
     { id: 'periodo', label: 'Período de Inscrição', icon: CalendarClock },
     { id: 'salas', label: 'Salas', icon: DoorOpen },
-    { id: 'inscricoes', label: 'Pessoas', icon: ClipboardList },
+    { id: 'inscricoes', label: 'Espectadores', icon: ClipboardList },
     { id: 'historico', label: 'Histórico Semestral', icon: Archive },
+    { id: 'logs', label: 'Logs', icon: ShieldCheck },
     { id: 'configuracoes', label: 'Configurações', icon: Settings },
   ];
 
+  const abaAtualLabel = tabs.find((t) => t.id === tab)?.label || 'Administração';
+
   return (
-    <div className="min-h-screen flex bg-slate-50">
+    <div className="min-h-screen lg:h-screen lg:overflow-hidden flex bg-slate-50">
       <aside
-        className={`fixed inset-y-0 left-0 z-40 w-64 bg-slate-900 text-white flex flex-col transform transition-transform lg:static lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-40 w-64 bg-slate-900 text-white flex flex-col transform transition-transform lg:static lg:h-screen lg:shrink-0 lg:translate-x-0 ${
           sidebarOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
-        <div className="p-6 border-b border-slate-800 flex items-center gap-3">
+        <div className="p-6 border-b border-slate-800 flex items-center gap-3 shrink-0">
           <div className="w-10 h-10 rounded-xl bg-indigo-600 flex items-center justify-center">
             <GraduationCap className="w-5 h-5 text-white" />
           </div>
@@ -88,19 +93,21 @@ export default function AdminDashboard() {
                   : 'text-slate-300 hover:bg-slate-800'
               }`}
             >
-              <t.icon className="w-4 h-4" />
-              {t.label}
+              <t.icon className="w-4 h-4 shrink-0" />
+              <span className="truncate">{t.label}</span>
             </button>
           ))}
         </nav>
 
-        <div className="p-4 border-t border-slate-800 space-y-3">
+        <div className="p-4 border-t border-slate-800 space-y-3 shrink-0">
           <div className="flex items-center gap-3 px-2">
-            <div className="w-8 h-8 rounded-full bg-indigo-500 flex items-center justify-center text-xs font-bold">
+            <div className="w-8 h-8 rounded-full bg-indigo-500 flex items-center justify-center text-xs font-bold shrink-0">
               {(user?.full_name || user?.email || 'A')[0].toUpperCase()}
             </div>
             <div className="min-w-0">
-              <p className="text-xs font-medium truncate">{user?.full_name || 'Administrador'}</p>
+              <p className="text-xs font-medium truncate">
+                {user?.full_name || 'Administrador'}
+              </p>
               <p className="text-[11px] text-slate-400 truncate">{user?.email}</p>
             </div>
           </div>
@@ -120,12 +127,12 @@ export default function AdminDashboard() {
         />
       )}
 
-      <div className="flex-1 flex flex-col min-w-0">
-        <header className="lg:hidden bg-white border-b border-slate-200 px-4 py-3 flex items-center gap-3">
+      <div className="flex-1 flex flex-col min-w-0 lg:h-screen">
+        <header className="lg:hidden bg-white border-b border-slate-200 px-4 py-3 flex items-center gap-3 shrink-0">
           <button onClick={() => setSidebarOpen(true)}>
-            <Menu className="w-6 h-6" />
+            <Menu className="w-6 h-6 text-slate-700" />
           </button>
-          <span className="font-bold text-slate-900">Painel Admin</span>
+          <span className="font-bold text-slate-900">{abaAtualLabel}</span>
         </header>
 
         <main className="flex-1 p-6 lg:p-8 overflow-y-auto">
@@ -137,6 +144,7 @@ export default function AdminDashboard() {
           {tab === 'salas' && <AdminSalas />}
           {tab === 'inscricoes' && <AdminInscricoes />}
           {tab === 'historico' && <AdminHistoricoSemestres />}
+          {tab === 'logs' && <AdminLogs />}
           {tab === 'configuracoes' && <AdminConfiguracoes />}
         </main>
       </div>

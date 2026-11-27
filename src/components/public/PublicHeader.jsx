@@ -20,7 +20,7 @@ export default function PublicHeader() {
               to="/area-professor"
               className="px-2.5 py-1.5 sm:px-3 sm:py-2 rounded-lg text-xs sm:text-sm text-slate-700 hover:text-indigo-600 hover:bg-slate-100 font-medium transition"
             >
-              Professor
+              Orientador
             </Link>
             <Link
               to="/login"
