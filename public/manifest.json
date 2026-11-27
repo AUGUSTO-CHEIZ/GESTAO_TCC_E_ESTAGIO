@@ -1,6 +1,6 @@
 {
-  "name": "Psicologia Unesc",
-  "short_name": "Psicologia Unesc",
+  "name": "GestorPsico TCC — Bancas de Psicologia",
+  "short_name": "Bancas TCC",
   "description": "Sistema de agendamento, inscrição e acompanhamento das bancas de TCC de Psicologia.",
   "start_url": "/",
   "scope": "/",

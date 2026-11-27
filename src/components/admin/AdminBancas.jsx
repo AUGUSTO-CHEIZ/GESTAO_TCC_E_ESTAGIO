@@ -190,7 +190,7 @@ export default function AdminBancas() {
     try {
       const { error } = await supabase
         .from('bancas')
-        .update({ status: 'aprovada' })
+        .update({ status: 'agendada' })
         .eq('id', banca.id);
 
       if (error) throw error;

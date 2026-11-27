@@ -191,31 +191,132 @@ export function avaliarTravaSegundaHora(banca, horario = null, agoraMs = Date.no
   return { bloqueada, horarioLiberacao, liberacaoMs };
 }
 
-// 1. Listar Agenda Pública (Evento, Horários, Salas e Bancas com vagas e trava de 15 min)
+// Avalia se um perfil específico ('tcc' | 'familiar' | 'academico') está liberado agora
+export function avaliarPeriodoPorCategoria(evento, categoria = 'tcc', agora = new Date()) {
+  if (!evento) {
+    return { liberado: true, motivo: '' };
+  }
+
+  if (evento.inscricoes_abertas === false) {
+    return { liberado: false, motivo: 'As inscrições estão temporariamente pausadas.' };
+  }
+
+  const map = {
+    tcc: {
+      aberta: evento.inscricao_tcc_aberta,
+      inicio:
+        evento.inscricao_tcc_inicio ||
+        evento.inscricao_abertura ||
+        evento.inscricao_apresentador_inicio,
+      fim:
+        evento.inscricao_tcc_fim ||
+        evento.inscricao_fechamento ||
+        evento.inscricao_apresentador_fim,
+      nome: 'apresentadores de TCC',
+    },
+    apresentador: {
+      aberta: evento.inscricao_tcc_aberta,
+      inicio:
+        evento.inscricao_tcc_inicio ||
+        evento.inscricao_abertura ||
+        evento.inscricao_apresentador_inicio,
+      fim:
+        evento.inscricao_tcc_fim ||
+        evento.inscricao_fechamento ||
+        evento.inscricao_apresentador_fim,
+      nome: 'apresentadores de TCC',
+    },
+    familiar: {
+      aberta: evento.inscricao_familiar_aberta,
+      inicio: evento.inscricao_familiar_inicio,
+      fim: evento.inscricao_familiar_fim,
+      nome: 'familiares e amigos',
+    },
+    academico: {
+      aberta: evento.inscricao_aluno_aberta,
+      inicio: evento.inscricao_aluno_inicio,
+      fim: evento.inscricao_aluno_fim,
+      nome: 'alunos / acadêmicos',
+    },
+    aluno: {
+      aberta: evento.inscricao_aluno_aberta,
+      inicio: evento.inscricao_aluno_inicio,
+      fim: evento.inscricao_aluno_fim,
+      nome: 'alunos / acadêmicos',
+    },
+  };
+
+  const regra = map[categoria] || map.tcc;
+
+  if (regra.aberta === false) {
+    return {
+      liberado: false,
+      motivo: `As inscrições para ${regra.nome} não estão liberadas no momento.`,
+    };
+  }
+
+  if (regra.inicio) {
+    const dtInicio = new Date(regra.inicio);
+    if (!Number.isNaN(dtInicio.getTime()) && agora < dtInicio) {
+      return {
+        liberado: false,
+        motivo: `O período de inscrição para ${regra.nome} abrirá em ${dtInicio.toLocaleString('pt-BR', {
+          dateStyle: 'short',
+          timeStyle: 'short',
+        })}.`,
+      };
+    }
+  }
+
+  if (regra.fim) {
+    const dtFim = new Date(regra.fim);
+    if (!Number.isNaN(dtFim.getTime()) && agora > dtFim) {
+      return {
+        liberado: false,
+        motivo: `O prazo de inscrição para ${regra.nome} já encerrou em ${dtFim.toLocaleString('pt-BR', {
+          dateStyle: 'short',
+          timeStyle: 'short',
+        })}.`,
+      };
+    }
+  }
+
+  return { liberado: true, motivo: '' };
+}
+
+// 1. Listar Agenda Pública (Titulação do Orientador + Limite Individual por Horário + 3 Prazos)
 export async function listarAgendaPublica() {
   try {
-    const [eventoRes, horariosRes, bancasRes, inscricoesRes, salasRes] = await Promise.all([
-      supabase.from('configuracao_evento').select('*').limit(1),
-      supabase
-        .from('horarios')
-        .select('*')
-        .eq('ativo', true)
-        .order('data', { ascending: true })
-        .order('hora_inicio', { ascending: true }),
-      supabase.from('bancas').select('*').neq('status', 'cancelada'),
-      supabase.from('inscricoes').select('id, banca_id, tipo'),
-      supabase.from('salas').select('*').eq('ativa', true).order('nome', { ascending: true }),
-    ]);
+    const [eventoRes, horariosRes, bancasRes, inscricoesRes, salasRes, profsRes] =
+      await Promise.all([
+        supabase.from('configuracao_evento').select('*').limit(1),
+        supabase
+          .from('horarios')
+          .select('*')
+          .eq('ativo', true)
+          .order('data', { ascending: true })
+          .order('hora_inicio', { ascending: true }),
+        supabase.from('bancas').select('*').neq('status', 'cancelada'),
+        supabase.from('inscricoes').select('id, banca_id, tipo'),
+        supabase.from('salas').select('*').eq('ativa', true).order('nome', { ascending: true }),
+        supabase.from('professores').select('id, nome, titulacao'),
+      ]);
 
     const evento = eventoRes.data?.[0] || null;
     const horarios = horariosRes.data || [];
     const bancas = bancasRes.data || [];
     const inscricoes = inscricoesRes.data || [];
     const salas = salasRes.data || [];
-    const maxBancas = evento?.max_bancas_por_horario || 2;
+    const professores = profsRes.data || [];
+    const maxBancasPadrao = evento?.max_bancas_por_horario ?? 2;
     const agoraMs = Date.now();
+    const agoraDate = new Date(agoraMs);
 
     const horarioMap = Object.fromEntries(horarios.map((h) => [h.id, h]));
+    const profPorId = Object.fromEntries(professores.map((p) => [p.id, p]));
+    const profPorNome = Object.fromEntries(
+      professores.map((p) => [String(p.nome || '').trim().toLowerCase(), p])
+    );
 
     const bancasComVagas = bancas.map((banca) => {
       const h = horarioMap[banca.horario_id];
@@ -225,11 +326,25 @@ export async function listarAgendaPublica() {
       const ocupadas = espectadores.length;
       const trava = avaliarTravaSegundaHora(banca, h, agoraMs);
 
+      const profObj =
+        profPorId[banca.orientador_id] ||
+        profPorNome[String(banca.orientador_nome || '').trim().toLowerCase()] ||
+        null;
+      const orientadorTitulacao = String(profObj?.titulacao || '').trim();
+      const orientadorNome = String(banca.orientador_nome || profObj?.nome || '').trim();
+      const orientadorComTitulacao =
+        orientadorTitulacao &&
+        !orientadorNome.toLowerCase().startsWith(orientadorTitulacao.toLowerCase())
+          ? `${orientadorTitulacao} ${orientadorNome}`
+          : orientadorNome;
+
       return {
         ...banca,
         hora_inicio: h?.hora_inicio || '',
         hora_fim: h?.hora_fim || '',
         horario_data: banca.horario_data || h?.data || '',
+        orientador_titulacao: orientadorTitulacao,
+        orientador_com_titulacao: orientadorComTitulacao,
         vagas_espectadores: totalVagas,
         vagas_ocupadas: ocupadas,
         vagas_restantes: Math.max(0, totalVagas - ocupadas),
@@ -243,15 +358,21 @@ export async function listarAgendaPublica() {
     const horariosComContagem = horarios.map((h) => {
       const bancasDoHorario = bancasComVagas.filter((b) => b.horario_id === h.id);
       const count = bancasDoHorario.length;
+      const limiteSlot =
+        h.max_bancas !== null && h.max_bancas !== undefined
+          ? Number(h.max_bancas)
+          : maxBancasPadrao;
+
       return {
         id: h.id,
         data: h.data,
         hora_inicio: h.hora_inicio,
         hora_fim: h.hora_fim,
         descricao: h.descricao,
+        max_bancas: limiteSlot,
         bancas_count: count,
-        vagas_apresentacao: Math.max(0, maxBancas - count),
-        disponivel: count < maxBancas,
+        vagas_apresentacao: Math.max(0, limiteSlot - count),
+        disponivel: limiteSlot > 0 && count < limiteSlot,
         salas_ocupadas: bancasDoHorario.map((b) => b.sala_id).filter(Boolean),
       };
     });
@@ -260,15 +381,15 @@ export async function listarAgendaPublica() {
       data: {
         evento: evento
           ? {
-              nome_evento: evento.nome_evento,
-              data_inicio: evento.data_inicio,
-              data_fim: evento.data_fim,
-              local: evento.local,
-              descricao: evento.descricao,
-              inscricoes_abertas: evento.inscricoes_abertas,
-              max_bancas_por_horario: maxBancas,
+              ...evento,
+              max_bancas_por_horario: maxBancasPadrao,
             }
           : null,
+        periodos: {
+          tcc: avaliarPeriodoPorCategoria(evento, 'tcc', agoraDate),
+          familiar: avaliarPeriodoPorCategoria(evento, 'familiar', agoraDate),
+          academico: avaliarPeriodoPorCategoria(evento, 'academico', agoraDate),
+        },
         horarios: horariosComContagem,
         bancas: bancasComVagas,
         salas,
@@ -279,53 +400,7 @@ export async function listarAgendaPublica() {
   }
 }
 
-// 2. Buscar pré-cadastro de aluno pelo código exato
-export async function buscarAlunoPorCodigo(codigo) {
-  try {
-    const cleanCode = String(codigo || '').trim();
-    if (!cleanCode) {
-      return { data: { error: 'Digite o código do aluno.' } };
-    }
-
-    const { data: aluno, error } = await supabase
-      .from('alunos_precadastro')
-      .select('*')
-      .ilike('codigo_aluno', cleanCode)
-      .maybeSingle();
-
-    if (error) throw error;
-    if (!aluno) {
-      return { data: { error: 'Código de aluno não encontrado no pré-cadastro.' } };
-    }
-
-    const { data: professores } = await supabase
-      .from('professores')
-      .select('id, nome')
-      .eq('ativo', true);
-
-    const profMatch =
-      (professores || []).find(
-        (p) => p.nome.trim().toLowerCase() === aluno.orientador_nome.trim().toLowerCase()
-      ) ||
-      (professores || []).find((p) =>
-        p.nome.trim().toLowerCase().includes(aluno.orientador_nome.trim().toLowerCase())
-      );
-
-    return {
-      data: {
-        success: true,
-        aluno: {
-          ...aluno,
-          orientador_id: profMatch?.id || '',
-        },
-      },
-    };
-  } catch (error) {
-    return { data: { error: error.message } };
-  }
-}
-
-// 3. Criar Inscrição (Apresentador ou Espectador Multi-Bancas com trava de 15 min)
+// 3. Criar Inscrição (Apresentador ou Espectador com períodos separados e limite individual por horário)
 export async function criarInscricao(body) {
   try {
     if (!body.tipo || !body.nome) {
@@ -334,13 +409,13 @@ export async function criarInscricao(body) {
 
     const { data: eventos } = await supabase.from('configuracao_evento').select('*').limit(1);
     const evento = eventos?.[0] || null;
-    if (evento && evento.inscricoes_abertas === false) {
-      return { data: { error: 'As inscrições estão encerradas no momento.' } };
-    }
-
-    const maxBancas = evento?.max_bancas_por_horario || 2;
 
     if (body.tipo === 'apresentador') {
+      const checkTcc = avaliarPeriodoPorCategoria(evento, 'tcc', new Date());
+      if (!checkTcc.liberado) {
+        return { data: { error: checkTcc.motivo } };
+      }
+
       const isExterno = body.avaliador2_tipo === 'externo';
 
       if (!body.codigo_academico || !body.email || !body.horario_id || !body.titulo_tcc) {
@@ -401,14 +476,27 @@ export async function criarInscricao(body) {
         return { data: { error: 'Horário selecionado não encontrado.' } };
       }
 
+      const limiteHorario =
+        horario.max_bancas !== null && horario.max_bancas !== undefined
+          ? Number(horario.max_bancas)
+          : evento?.max_bancas_por_horario ?? 2;
+
+      if (limiteHorario <= 0) {
+        return { data: { error: 'Este horário não está disponível para agendamentos.' } };
+      }
+
       const { data: bancasNoHorario } = await supabase
         .from('bancas')
         .select('*')
         .eq('horario_id', body.horario_id)
         .neq('status', 'cancelada');
 
-      if ((bancasNoHorario || []).length >= maxBancas) {
-        return { data: { error: 'Este horário já atingiu o limite de 2 apresentações.' } };
+      if ((bancasNoHorario || []).length >= limiteHorario) {
+        return {
+          data: {
+            error: `Este horário já atingiu o limite de ${limiteHorario} apresentação(ões).`,
+          },
+        };
       }
 
       for (const other of bancasNoHorario || []) {
@@ -461,7 +549,7 @@ export async function criarInscricao(body) {
           apresentador_email: body.email,
           apresentador_codigo: body.codigo_academico,
           status: 'agendada',
-          vagas_espectadores: 30,
+          vagas_espectadores: salaLivre?.capacidade || 30,
         })
         .select()
         .single();
@@ -502,7 +590,7 @@ export async function criarInscricao(body) {
   }
 }
 
-// --- FLUXO ESPECTADOR (SUPORTA 1 OU VÁRIAS BANCAS + SENHA + E-MAIL OPCIONAL PARA FAMILIAR) ---
+// --- FLUXO ESPECTADOR (COM PRAZOS SEPARADOS PARA FAMILIARES E ALUNOS) ---
 export async function criarInscricaoEspectador(body) {
   try {
     const tipo = body?.tipo || 'academico';
@@ -512,6 +600,13 @@ export async function criarInscricaoEspectador(body) {
 
     if (!nome) {
       return { data: { error: 'Nome completo é obrigatório.' } };
+    }
+
+    const { data: eventos } = await supabase.from('configuracao_evento').select('*').limit(1);
+    const evento = eventos?.[0] || null;
+    const checkCategoria = avaliarPeriodoPorCategoria(evento, tipo, new Date());
+    if (!checkCategoria.liberado) {
+      return { data: { error: checkCategoria.motivo } };
     }
 
     if (tipo === 'academico' && !emailRaw) {
@@ -532,14 +627,10 @@ export async function criarInscricaoEspectador(body) {
 
     if (!senha || senha.length < 4) {
       return {
-        data: { error: 'Defina uma senha (mínimo de 4 caracteres) para consultar sua inscrição depois.' },
+        data: {
+          error: 'Defina uma senha (mínimo de 4 caracteres) para consultar sua inscrição depois.',
+        },
       };
-    }
-
-    const { data: eventos } = await supabase.from('configuracao_evento').select('*').limit(1);
-    const evento = eventos?.[0] || null;
-    if (evento && evento.inscricoes_abertas === false) {
-      return { data: { error: 'As inscrições estão encerradas no momento.' } };
     }
 
     const bancaIds =
@@ -661,7 +752,46 @@ export async function criarInscricaoEspectador(body) {
   }
 }
 
-// 4. Consultar Inscrições por Código do Aluno ou E-mail
+// 11. Verificar Prazo de Inscrição do Apresentador (TCCs)
+export async function verificarPrazoApresentador() {
+  try {
+    const { data: eventos, error } = await supabase
+      .from('configuracao_evento')
+      .select('*')
+      .limit(1);
+
+    if (error) throw error;
+
+    const evento = eventos?.[0] || null;
+    const check = avaliarPeriodoPorCategoria(evento, 'tcc', new Date());
+
+    return {
+      data: {
+        aberto: check.liberado,
+        permitido: check.liberado,
+        dentro_do_prazo: check.liberado,
+        motivo: check.motivo,
+        mensagem: check.motivo,
+        evento,
+      },
+    };
+  } catch (error) {
+    return { data: { error: error.message } };
+  }
+}
+
+// Função auxiliar interna para hash SHA-256 (evita conflito de exportação)
+async function gerarHashSenhaLocal(senha) {
+  const texto = String(senha || '');
+  const encoder = new TextEncoder();
+  const data = encoder.encode(texto);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(hashBuffer))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+// 4. Consultar Inscrições por Código ou E-mail (compatibilidade)
 export async function consultarInscricao({ codigo, email }) {
   try {
     const termo = String(codigo || email || '').trim();
@@ -709,7 +839,7 @@ export async function consultarInscricao({ codigo, email }) {
   }
 }
 
-// Consultar inscrições exigindo E-mail ou Código + Senha
+// 4.1. Consultar Inscrições exigindo E-mail ou Código + Senha
 export async function consultarInscricaoComSenha({ codigo, email, senha }) {
   try {
     const identificador = String(email || codigo || '').trim();
@@ -737,7 +867,7 @@ export async function consultarInscricaoComSenha({ codigo, email, senha }) {
       return { data: { error: 'Nenhuma inscrição encontrada para este e-mail ou código.' } };
     }
 
-    const hashInformado = await gerarHashSenha(senhaInformada);
+    const hashInformado = await gerarHashSenhaLocal(senhaInformada);
     const validadas = inscricoes.filter(
       (i) =>
         (i.senha_hash && i.senha_hash === hashInformado) ||
@@ -774,6 +904,129 @@ export async function consultarInscricaoComSenha({ codigo, email, senha }) {
     );
 
     return { data: { success: true, inscricoes: enriched } };
+  } catch (error) {
+    return { data: { error: error.message } };
+  }
+}
+
+// 4.2. Solicitar código de recuperação de senha da inscrição
+export async function solicitarRecuperacaoSenha({ email, codigo }) {
+  try {
+    const identificador = String(email || codigo || '').trim();
+    if (!identificador) {
+      return { data: { error: 'Informe o e-mail ou código cadastrado na inscrição.' } };
+    }
+
+    let query = supabase.from('inscricoes').select('id, nome, email, codigo_academico');
+    if (identificador.includes('@')) {
+      query = query.ilike('email', identificador);
+    } else {
+      query = query.or(`codigo_academico.ilike.${identificador},email.ilike.${identificador}`);
+    }
+
+    const { data: registros, error } = await query;
+    if (error) throw error;
+
+    if (!registros || registros.length === 0) {
+      return { data: { error: 'Nenhuma inscrição encontrada com esse dado.' } };
+    }
+
+    const tokenRecuperacao = Math.random().toString(36).substring(2, 8).toUpperCase();
+    const expiracao = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    const ids = registros.map((r) => r.id);
+
+    await supabase
+      .from('inscricoes')
+      .update({
+        token_recuperacao: tokenRecuperacao,
+        token_recuperacao_expira: expiracao,
+      })
+      .in('id', ids);
+
+    const destinoEmail = registros.find((r) => r.email)?.email || '';
+
+    if (destinoEmail) {
+      try {
+        await supabase.functions.invoke('enviar-recuperacao-senha', {
+          body: {
+            to: destinoEmail,
+            codigo_recuperacao: tokenRecuperacao,
+            nome: registros[0].nome,
+          },
+        });
+      } catch (_) {
+        // Fallback caso a Edge Function não esteja ativa
+      }
+    }
+
+    return {
+      data: {
+        success: true,
+        email_mascarado: destinoEmail || null,
+        codigo_recuperacao: destinoEmail ? undefined : tokenRecuperacao,
+        mensagem: destinoEmail
+          ? `Código de recuperação gerado para ${destinoEmail}.`
+          : `Código de recuperação gerado: ${tokenRecuperacao}`,
+      },
+    };
+  } catch (error) {
+    return { data: { error: error.message } };
+  }
+}
+
+// 4.3. Redefinir senha da inscrição
+export async function redefinirSenhaInscricao({ email, codigo, token, novaSenha }) {
+  try {
+    const identificador = String(email || codigo || '').trim();
+    const tokenInformado = String(token || '').trim().toUpperCase();
+    const novaSenhaLimpa = String(novaSenha || '').trim();
+
+    if (!identificador || !novaSenhaLimpa || novaSenhaLimpa.length < 4) {
+      return {
+        data: { error: 'Informe o e-mail/código e a nova senha (mínimo de 4 caracteres).' },
+      };
+    }
+
+    let query = supabase.from('inscricoes').select('*');
+    if (identificador.includes('@')) {
+      query = query.ilike('email', identificador);
+    } else {
+      query = query.or(`codigo_academico.ilike.${identificador},email.ilike.${identificador}`);
+    }
+
+    const { data: registros, error } = await query;
+    if (error) throw error;
+
+    if (!registros || registros.length === 0) {
+      return { data: { error: 'Inscrição não encontrada.' } };
+    }
+
+    if (tokenInformado) {
+      const valido = registros.some(
+        (r) =>
+          String(r.token_recuperacao || '').toUpperCase() === tokenInformado &&
+          (!r.token_recuperacao_expira || new Date(r.token_recuperacao_expira) > new Date())
+      );
+      if (!valido) {
+        return { data: { error: 'Código de recuperação inválido ou expirado.' } };
+      }
+    }
+
+    const novoHash = await gerarHashSenhaLocal(novaSenhaLimpa);
+    const ids = registros.map((r) => r.id);
+
+    const { error: updErr } = await supabase
+      .from('inscricoes')
+      .update({
+        senha_hash: novoHash,
+        token_recuperacao: null,
+        token_recuperacao_expira: null,
+      })
+      .in('id', ids);
+
+    if (updErr) throw updErr;
+
+    return { data: { success: true, mensagem: 'Senha atualizada com sucesso!' } };
   } catch (error) {
     return { data: { error: error.message } };
   }
@@ -844,7 +1097,7 @@ export async function vincularProfessorUsuario() {
   }
 }
 
-// 6. Confirmar Presença (1ª ou 2ª Chamada) com fallback e validação de erro
+// 6. Confirmar Presença (1ª ou 2ª Chamada)
 export async function confirmarPresenca({ inscricao_id, presente, etapa = 1 }) {
   try {
     const {
@@ -871,33 +1124,27 @@ export async function confirmarPresenca({ inscricao_id, presente, etapa = 1 }) {
       .eq('id', inscricao_id);
 
     if (updErr && /presente_chamada/i.test(updErr.message || '')) {
-      const retry = await supabase
+      const fallback = await supabase
         .from('inscricoes')
         .update({ presente })
         .eq('id', inscricao_id);
-      updErr = retry.error;
+      updErr = fallback.error;
     }
 
-    if (updErr) {
-      return { data: { error: `Não foi possível salvar presença: ${updErr.message}` } };
-    }
+    if (updErr) throw updErr;
 
-    try {
-      await supabase.from('presencas').upsert({
-        inscricao_id,
-        inscricao_nome: inscricao.nome,
-        inscricao_tipo: inscricao.tipo,
-        banca_id: inscricao.banca_id,
-        banca_titulo: inscricao.banca_titulo,
-        orientador_user_id: inscricao.orientador_user_id,
-        presente,
-        confirmado_por_professor_id: user.id,
-        confirmado_por_nome: user.user_metadata?.full_name || user.email,
-        data_confirmacao: new Date().toISOString(),
-      });
-    } catch (_) {
-      // Ignora erro secundário na tabela auxiliar de log
-    }
+    await supabase.from('presencas').upsert({
+      inscricao_id,
+      inscricao_nome: inscricao.nome,
+      inscricao_tipo: inscricao.tipo,
+      banca_id: inscricao.banca_id,
+      banca_titulo: inscricao.banca_titulo,
+      orientador_user_id: inscricao.orientador_user_id,
+      presente,
+      confirmado_por_professor_id: user.id,
+      confirmado_por_nome: user.user_metadata?.full_name || user.email,
+      data_confirmacao: new Date().toISOString(),
+    });
 
     return { data: { success: true } };
   } catch (error) {
@@ -905,12 +1152,8 @@ export async function confirmarPresenca({ inscricao_id, presente, etapa = 1 }) {
   }
 }
 
-// 7. Concluir 1ª Chamada: mantém os presentes e libera vagas SOMENTE pelos ausentes
-export async function finalizarPrimeiraChamada({
-  banca_id,
-  horario_chamada,
-  presentes_ids = null,
-}) {
+// 7. Concluir 1ª Chamada: move ausentes para histórico e libera vagas para 2ª hora
+export async function finalizarPrimeiraChamada({ banca_id, horario_chamada }) {
   try {
     const {
       data: { user },
@@ -920,69 +1163,40 @@ export async function finalizarPrimeiraChamada({
     const { data: banca } = await supabase.from('bancas').select('*').eq('id', banca_id).single();
     if (!banca) return { data: { error: 'Banca não encontrada' } };
 
-    const { data: inscricoes, error: listErr } = await supabase
+    const { data: inscricoes } = await supabase
       .from('inscricoes')
       .select('*')
       .eq('banca_id', banca_id);
 
-    if (listErr) throw listErr;
-
-    const espectadores = (inscricoes || []).filter((i) => i.tipo !== 'apresentador');
-    const usarListaTela = Array.isArray(presentes_ids);
-
-    if (usarListaTela && presentes_ids.length > 0) {
-      let { error: syncErr } = await supabase
-        .from('inscricoes')
-        .update({ presente: true, presente_chamada1: true })
-        .in('id', presentes_ids);
-
-      if (syncErr && /presente_chamada/i.test(syncErr.message || '')) {
-        const retrySync = await supabase
-          .from('inscricoes')
-          .update({ presente: true })
-          .in('id', presentes_ids);
-        syncErr = retrySync.error;
-      }
-      if (syncErr) throw syncErr;
-    }
-
-    const ausentes = espectadores.filter((i) =>
-      usarListaTela ? !presentes_ids.includes(i.id) : !i.presente_chamada1 && !i.presente
+    const ausentes = (inscricoes || []).filter(
+      (i) => i.tipo !== 'apresentador' && !i.presente_chamada1 && !i.presente
     );
 
     if (ausentes.length > 0) {
-      try {
-        const historicoRows = ausentes.map((a) => ({
-          banca_id,
-          banca_titulo: banca.titulo_tcc,
-          horario_descricao: banca.horario_descricao || '',
-          horario_data: banca.horario_data || '',
-          nome: a.nome,
-          email: a.email || '',
-          codigo_academico: a.codigo_academico || '',
-          tipo: a.tipo,
-          etapa_falta: '1ª Chamada',
-          registrado_por: user.user_metadata?.full_name || user.email,
-        }));
-        await supabase.from('inscricoes_ausentes').insert(historicoRows);
-      } catch (_) {
-        // Prossegue com a liberação das vagas mesmo se a tabela de histórico não existir
-      }
+      const historicoRows = ausentes.map((a) => ({
+        banca_id,
+        banca_titulo: banca.titulo_tcc,
+        horario_descricao: banca.horario_descricao || '',
+        horario_data: banca.horario_data || '',
+        nome: a.nome,
+        email: a.email || '',
+        codigo_academico: a.codigo_academico || '',
+        tipo: a.tipo,
+        etapa_falta: '1ª Chamada',
+        registrado_por: user.user_metadata?.full_name || user.email,
+      }));
 
-      const { error: delErr } = await supabase
+      await supabase.from('inscricoes_ausentes').insert(historicoRows);
+      await supabase
         .from('inscricoes')
         .delete()
         .in(
           'id',
           ausentes.map((a) => a.id)
         );
-
-      if (delErr) {
-        return { data: { error: `Erro ao liberar vagas dos ausentes: ${delErr.message}` } };
-      }
     }
 
-    const { error: bancaUpdErr } = await supabase
+    await supabase
       .from('bancas')
       .update({
         chamada1_concluida: true,
@@ -990,20 +1204,7 @@ export async function finalizarPrimeiraChamada({
       })
       .eq('id', banca_id);
 
-    if (bancaUpdErr) throw bancaUpdErr;
-
-    const totalVagas = banca.vagas_espectadores || 30;
-    const presentesMantidos = espectadores.length - ausentes.length;
-    const vagasDisponiveis = Math.max(0, totalVagas - presentesMantidos);
-
-    return {
-      data: {
-        success: true,
-        vagas_liberadas: ausentes.length,
-        vagas_disponiveis: vagasDisponiveis,
-        presentes_mantidos: presentesMantidos,
-      },
-    };
+    return { data: { success: true, vagas_liberadas: ausentes.length } };
   } catch (error) {
     return { data: { error: error.message } };
   }
@@ -1049,7 +1250,7 @@ export async function adicionarAlunoUltimaHora(body) {
     const { data: banca } = await supabase.from('bancas').select('*').eq('id', banca_id).single();
     if (!banca) return { data: { error: 'Banca não encontrada' } };
 
-    let payload = {
+    const payload = {
       banca_id,
       banca_titulo: banca.titulo_tcc,
       horario_descricao: banca.horario_descricao || '',
@@ -1133,76 +1334,6 @@ export async function atualizarProfessoresBanca(body) {
 
     await supabase.from('bancas').update(updates).eq('id', banca_id);
     return { data: { success: true } };
-  } catch (error) {
-    return { data: { error: error.message } };
-  }
-}
-
-// 11. Verificar Prazo de Inscrição do Apresentador
-export async function verificarPrazoApresentador() {
-  try {
-    const { data: eventos, error } = await supabase
-      .from('configuracao_evento')
-      .select('*')
-      .limit(1);
-
-    if (error) throw error;
-
-    const evento = eventos?.[0] || null;
-    if (!evento) {
-      return {
-        data: {
-          aberto: true,
-          permitido: true,
-          dentro_do_prazo: true,
-          evento: null,
-        },
-      };
-    }
-
-    const agora = new Date();
-    const inicioRaw =
-      evento.data_inicio_apresentador || evento.inicio_inscricao_apresentador || null;
-    const fimRaw =
-      evento.prazo_apresentador ||
-      evento.data_limite_apresentador ||
-      evento.data_fim_apresentador ||
-      evento.prazo_inscricao_apresentador ||
-      null;
-
-    let dentroDoPrazo = evento.inscricoes_abertas !== false;
-    let motivo = '';
-
-    if (!dentroDoPrazo) {
-      motivo = 'As inscrições estão encerradas no momento.';
-    }
-
-    if (dentroDoPrazo && inicioRaw) {
-      const dtInicio = new Date(inicioRaw);
-      if (!Number.isNaN(dtInicio.getTime()) && agora < dtInicio) {
-        dentroDoPrazo = false;
-        motivo = 'O período de inscrição para apresentadores ainda não iniciou.';
-      }
-    }
-
-    if (dentroDoPrazo && fimRaw) {
-      const dtFim = new Date(fimRaw);
-      if (!Number.isNaN(dtFim.getTime()) && agora > dtFim) {
-        dentroDoPrazo = false;
-        motivo = 'O prazo de inscrição para apresentadores já foi encerrado.';
-      }
-    }
-
-    return {
-      data: {
-        aberto: dentroDoPrazo,
-        permitido: dentroDoPrazo,
-        dentro_do_prazo: dentroDoPrazo,
-        motivo,
-        mensagem: motivo,
-        evento,
-      },
-    };
   } catch (error) {
     return { data: { error: error.message } };
   }
@@ -1354,129 +1485,6 @@ export async function verificarPrimeiroAcessoProfessor(params) {
         professor,
       },
     };
-  } catch (error) {
-    return { data: { error: error.message } };
-  }
-}
-
-// 16. Solicitar código/token de recuperação de senha para o espectador
-export async function solicitarRecuperacaoSenha({ email, codigo }) {
-  try {
-    const identificador = String(email || codigo || '').trim();
-    if (!identificador) {
-      return { data: { error: 'Informe o e-mail ou código cadastrado na inscrição.' } };
-    }
-
-    let query = supabase.from('inscricoes').select('id, nome, email, codigo_academico');
-    if (identificador.includes('@')) {
-      query = query.ilike('email', identificador);
-    } else {
-      query = query.or(`codigo_academico.ilike.${identificador},email.ilike.${identificador}`);
-    }
-
-    const { data: registros, error } = await query;
-    if (error) throw error;
-
-    if (!registros || registros.length === 0) {
-      return { data: { error: 'Nenhuma inscrição encontrada com esse dado.' } };
-    }
-
-    const tokenRecuperacao = Math.random().toString(36).substring(2, 8).toUpperCase();
-    const expiracao = new Date(Date.now() + 30 * 60 * 1000).toISOString();
-    const ids = registros.map((r) => r.id);
-
-    await supabase
-      .from('inscricoes')
-      .update({
-        token_recuperacao: tokenRecuperacao,
-        token_recuperacao_expira: expiracao,
-      })
-      .in('id', ids);
-
-    const destinoEmail = registros.find((r) => r.email)?.email || '';
-
-    if (destinoEmail) {
-      try {
-        await supabase.functions.invoke('enviar-recuperacao-senha', {
-          body: {
-            to: destinoEmail,
-            codigo_recuperacao: tokenRecuperacao,
-            nome: registros[0].nome,
-          },
-        });
-      } catch (_) {
-        // Fallback caso a Edge Function não esteja configurada
-      }
-    }
-
-    return {
-      data: {
-        success: true,
-        email_mascarado: destinoEmail || null,
-        codigo_recuperacao: destinoEmail ? undefined : tokenRecuperacao,
-        mensagem: destinoEmail
-          ? `Código de recuperação gerado para ${destinoEmail}.`
-          : `Código de recuperação gerado: ${tokenRecuperacao}`,
-      },
-    };
-  } catch (error) {
-    return { data: { error: error.message } };
-  }
-}
-
-// 17. Redefinir senha da inscrição usando código de recuperação (ou e-mail/código + nova senha)
-export async function redefinirSenhaInscricao({ email, codigo, token, novaSenha }) {
-  try {
-    const identificador = String(email || codigo || '').trim();
-    const tokenInformado = String(token || '').trim().toUpperCase();
-    const novaSenhaLimpa = String(novaSenha || '').trim();
-
-    if (!identificador || !novaSenhaLimpa || novaSenhaLimpa.length < 4) {
-      return {
-        data: { error: 'Informe o e-mail/código e a nova senha (mínimo de 4 caracteres).' },
-      };
-    }
-
-    let query = supabase.from('inscricoes').select('*');
-    if (identificador.includes('@')) {
-      query = query.ilike('email', identificador);
-    } else {
-      query = query.or(`codigo_academico.ilike.${identificador},email.ilike.${identificador}`);
-    }
-
-    const { data: registros, error } = await query;
-    if (error) throw error;
-
-    if (!registros || registros.length === 0) {
-      return { data: { error: 'Inscrição não encontrada.' } };
-    }
-
-    if (tokenInformado) {
-      const valido = registros.some(
-        (r) =>
-          String(r.token_recuperacao || '').toUpperCase() === tokenInformado &&
-          (!r.token_recuperacao_expira || new Date(r.token_recuperacao_expira) > new Date())
-      );
-      if (!valido) {
-        return { data: { error: 'Código de recuperação inválido ou expirado.' } };
-      }
-    }
-
-    const novoHash = await gerarHashSenha(novaSenhaLimpa);
-    const ids = registros.map((r) => r.id);
-
-    const { error: updErr } = await supabase
-      .from('inscricoes')
-      .update({
-        senha_hash: novoHash,
-        token_recuperacao: null,
-        token_recuperacao_expira: null,
-      })
-      .in('id', ids);
-
-    if (updErr) throw updErr;
-
-    return { data: { success: true, mensagem: 'Senha atualizada com sucesso!' } };
   } catch (error) {
     return { data: { error: error.message } };
   }
