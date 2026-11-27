@@ -4,6 +4,7 @@ import { verificarEAtualizarSemestre } from '@/lib/api';
 import { useToast } from '@/components/ui/use-toast';
 import AdminOverview from '@/components/admin/AdminOverview';
 import AdminProfessores from '@/components/admin/AdminProfessores';
+import AdminAlunos from '@/components/admin/AdminAlunos';
 import AdminBancas from '@/components/admin/AdminBancas';
 import AdminHorarios from '@/components/admin/AdminHorarios';
 import AdminPeriodoInscricao from '@/components/admin/AdminPeriodoInscricao';
@@ -15,7 +16,8 @@ import AdminConfiguracoes from '@/components/admin/AdminConfiguracoes';
 import {
   LayoutDashboard,
   Users,
-  FileText,
+  UserCheck,
+  BookOpen,
   Calendar,
   CalendarClock,
   DoorOpen,
@@ -50,7 +52,8 @@ export default function AdminDashboard() {
   const tabs = [
     { id: 'overview', label: 'Bancas', icon: LayoutDashboard },
     { id: 'professores', label: 'Orientadores', icon: Users },
-    { id: 'bancas', label: 'Alunos', icon: FileText },
+    { id: 'alunos', label: 'Alunos', icon: UserCheck },
+    { id: 'tccs', label: 'TCCs', icon: BookOpen },
     { id: 'horarios', label: 'Horários', icon: Calendar },
     { id: 'periodo', label: 'Período de Inscrição', icon: CalendarClock },
     { id: 'salas', label: 'Salas', icon: DoorOpen },
@@ -138,7 +141,8 @@ export default function AdminDashboard() {
         <main className="flex-1 p-6 lg:p-8 overflow-y-auto">
           {tab === 'overview' && <AdminOverview />}
           {tab === 'professores' && <AdminProfessores />}
-          {tab === 'bancas' && <AdminBancas />}
+          {tab === 'alunos' && <AdminAlunos />}
+          {tab === 'tccs' && <AdminBancas />}
           {tab === 'horarios' && <AdminHorarios />}
           {tab === 'periodo' && <AdminPeriodoInscricao />}
           {tab === 'salas' && <AdminSalas />}

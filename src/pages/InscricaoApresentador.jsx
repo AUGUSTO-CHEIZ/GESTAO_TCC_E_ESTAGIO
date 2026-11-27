@@ -107,10 +107,14 @@ export default function InscricaoApresentador() {
         }
 
         const maxBancas = agendaRes?.data?.evento?.max_bancas_por_horario || 2;
-        const listaHorarios = (agendaRes?.data?.horarios || []).map((h) => ({
-          ...h,
-          disponivel: (h.bancas_count || 0) < maxBancas,
-        }));
+        const listaHorarios = (agendaRes?.data?.horarios || []).map((h) => {
+          const limiteSlot = h.max_bancas ?? maxBancas;
+          return {
+            ...h,
+            limite_bancas: limiteSlot,
+            disponivel: (h.bancas_count || 0) < limiteSlot,
+          };
+        });
         setHorarios(listaHorarios);
         setProfessores(profsRes?.data || []);
       } catch (err) {

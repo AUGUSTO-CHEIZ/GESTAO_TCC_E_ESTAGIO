@@ -1,5 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
-import * as XLSX from 'xlsx';
+import { useState, useEffect } from 'react';
 import { QRCodeCanvas } from 'qrcode.react';
 import { supabase } from '@/lib/supabase';
 import { Button } from '@/components/ui/button';
@@ -12,8 +11,6 @@ import {
   Plus,
   Pencil,
   Trash2,
-  Upload,
-  UserPlus,
   QrCode,
   Download,
   X,
@@ -41,21 +38,6 @@ const emptyForm = {
   vagas_espectadores: VAGAS_PADRAO,
 };
 
-const emptyAlunoForm = {
-  codigo_aluno: '',
-  nome_completo: '',
-  orientador_nome: '',
-  titulacao: '',
-};
-
-function normalizarChave(str) {
-  return String(str || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .trim();
-}
-
 function limparTexto(val) {
   if (val === null || val === undefined) return '';
   const s = String(val).trim();
@@ -68,9 +50,7 @@ export default function AdminBancas() {
   const [horarios, setHorarios] = useState([]);
   const [salas, setSalas] = useState([]);
   const [professores, setProfessores] = useState([]);
-  const [totalPreCadastro, setTotalPreCadastro] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [importando, setImportando] = useState(false);
   const [aprovandoId, setAprovandoId] = useState(null);
 
   const [busca, setBusca] = useState('');
@@ -80,17 +60,12 @@ export default function AdminBancas() {
   const [form, setForm] = useState(emptyForm);
   const [editId, setEditId] = useState(null);
 
-  const [showAlunoModal, setShowAlunoModal] = useState(false);
-  const [alunoForm, setAlunoForm] = useState(emptyAlunoForm);
-  const [salvandoAluno, setSalvandoAluno] = useState(false);
-
   const [qrBanca, setQrBanca] = useState(null);
-  const fileInputRef = useRef(null);
   const { toast } = useToast();
 
   async function load() {
     try {
-      const [bRes, hRes, sRes, pRes, preRes] = await Promise.all([
+      const [bRes, hRes, sRes, pRes] = await Promise.all([
         supabase.from('bancas').select('*').order('created_at', { ascending: false }),
         supabase.from('horarios').select('*').eq('ativo', true).order('data', { ascending: true }),
         supabase.from('salas').select('*').eq('ativa', true).order('nome', { ascending: true }),
@@ -99,13 +74,11 @@ export default function AdminBancas() {
           .select('id, nome, user_id')
           .eq('ativo', true)
           .order('nome', { ascending: true }),
-        supabase.from('alunos_precadastro').select('id', { count: 'exact', head: true }),
       ]);
       setBancas(bRes.data || []);
       setHorarios(hRes.data || []);
       setSalas(sRes.data || []);
       setProfessores(pRes.data || []);
-      setTotalPreCadastro(preRes.count || 0);
     } catch (e) {
       console.error(e);
     } finally {
@@ -235,119 +208,6 @@ export default function AdminBancas() {
     }
   }
 
-  async function handleSalvarAlunoAvulso(e) {
-    e.preventDefault();
-    const codigo = alunoForm.codigo_aluno.trim();
-    const nome = alunoForm.nome_completo.trim();
-    const orientador = alunoForm.orientador_nome.trim();
-    const titulacao = alunoForm.titulacao.trim();
-
-    if (!codigo || !nome) {
-      toast({
-        title: 'Campos obrigatórios',
-        description: 'Informe o código do aluno e o nome completo.',
-        variant: 'destructive',
-      });
-      return;
-    }
-
-    setSalvandoAluno(true);
-    try {
-      const { error } = await supabase.from('alunos_precadastro').upsert(
-        {
-          codigo_aluno: codigo,
-          nome_completo: nome,
-          orientador_nome: orientador,
-          titulacao,
-        },
-        { onConflict: 'codigo_aluno' }
-      );
-      if (error) throw error;
-
-      toast({
-        title: 'Aluno salvo no pré-cadastro!',
-        description: `${nome} (${codigo}) já pode realizar a inscrição.`,
-      });
-      setAlunoForm(emptyAlunoForm);
-      setShowAlunoModal(false);
-      load();
-    } catch (err) {
-      toast({
-        title: 'Erro ao cadastrar aluno',
-        description: err.message,
-        variant: 'destructive',
-      });
-    } finally {
-      setSalvandoAluno(false);
-    }
-  }
-
-  async function handleImportarExcel(e) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setImportando(true);
-    try {
-      const buffer = await file.arrayBuffer();
-      const wb = XLSX.read(buffer, { type: 'array' });
-      const primeiraAba = wb.Sheets[wb.SheetNames[0]];
-      const linhas = XLSX.utils.sheet_to_json(primeiraAba, { defval: '' });
-
-      const registros = linhas
-        .map((row) => {
-          const norm = Object.fromEntries(
-            Object.entries(row).map(([k, v]) => [normalizarChave(k), String(v).trim()])
-          );
-          return {
-            codigo_aluno:
-              norm['codigo do aluno'] ||
-              norm['codigo_aluno'] ||
-              norm['codigo'] ||
-              norm['matricula'] ||
-              '',
-            nome_completo:
-              norm['nome completo'] ||
-              norm['nome_completo'] ||
-              norm['nome'] ||
-              norm['aluno'] ||
-              '',
-            orientador_nome:
-              norm['orientador'] ||
-              norm['orientador_nome'] ||
-              norm['professor orientador'] ||
-              '',
-            titulacao: norm['titulacao'] || norm['titulo'] || '',
-          };
-        })
-        .filter((r) => r.codigo_aluno && r.nome_completo);
-
-      if (registros.length === 0) {
-        throw new Error(
-          'Nenhuma linha válida encontrada. Verifique as colunas: Código do aluno, Nome completo, Orientador e Titulação.'
-        );
-      }
-
-      const { error } = await supabase
-        .from('alunos_precadastro')
-        .upsert(registros, { onConflict: 'codigo_aluno' });
-      if (error) throw error;
-
-      toast({
-        title: 'Planilha importada!',
-        description: `${registros.length} aluno(s) sincronizado(s) no pré-cadastro.`,
-      });
-      load();
-    } catch (err) {
-      toast({
-        title: 'Erro ao importar Excel',
-        description: err.message,
-        variant: 'destructive',
-      });
-    } finally {
-      setImportando(false);
-      e.target.value = '';
-    }
-  }
-
   async function handleSave(e) {
     e.preventDefault();
     try {
@@ -462,34 +322,9 @@ export default function AdminBancas() {
     <div>
       <div className="flex flex-wrap justify-between items-center gap-3 mb-6">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Bancas</h1>
-          <p className="text-xs text-slate-500">{totalPreCadastro} aluno(s) no pré-cadastro</p>
+          <h1 className="text-2xl font-bold text-slate-900">TCCs</h1>
         </div>
         <div className="flex flex-wrap gap-2">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".xlsx,.xls,.csv"
-            onChange={handleImportarExcel}
-            className="hidden"
-          />
-          <Button
-            variant="outline"
-            disabled={importando}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            <Upload className="w-4 h-4 mr-2" />
-            {importando ? 'Importando...' : 'Importar Alunos (Excel)'}
-          </Button>
-          <Button
-            variant="outline"
-            onClick={() => {
-              setAlunoForm(emptyAlunoForm);
-              setShowAlunoModal(true);
-            }}
-          >
-            <UserPlus className="w-4 h-4 mr-2" /> Cadastrar Aluno
-          </Button>
           <Button
             onClick={() => {
               setForm(emptyForm);
@@ -806,82 +641,6 @@ export default function AdminBancas() {
               </div>
             </div>
           ))}
-        </div>
-      )}
-
-      {/* Modal Cadastro Avulso de Aluno */}
-      {showAlunoModal && (
-        <div
-          className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
-          onClick={() => setShowAlunoModal(false)}
-        >
-          <div
-            className="bg-white rounded-2xl max-w-md w-full p-6 space-y-4"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex justify-between items-center">
-              <h3 className="font-bold text-slate-900">Cadastrar Aluno no Pré-Cadastro</h3>
-              <button
-                onClick={() => setShowAlunoModal(false)}
-                className="text-slate-400 hover:text-slate-600"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            <form onSubmit={handleSalvarAlunoAvulso} className="space-y-3">
-              <div>
-                <Label>Código do Aluno *</Label>
-                <Input
-                  value={alunoForm.codigo_aluno}
-                  onChange={(e) =>
-                    setAlunoForm((f) => ({ ...f, codigo_aluno: e.target.value }))
-                  }
-                  required
-                />
-              </div>
-              <div>
-                <Label>Nome Completo *</Label>
-                <Input
-                  value={alunoForm.nome_completo}
-                  onChange={(e) =>
-                    setAlunoForm((f) => ({ ...f, nome_completo: e.target.value }))
-                  }
-                  required
-                />
-              </div>
-              <div>
-                <Label>Orientador</Label>
-                <Input
-                  value={alunoForm.orientador_nome}
-                  onChange={(e) =>
-                    setAlunoForm((f) => ({ ...f, orientador_nome: e.target.value }))
-                  }
-                />
-              </div>
-              <div>
-                <Label>Titulação do Orientador</Label>
-                <Input
-                  placeholder="Ex: Prof. Dr., Me., Esp."
-                  value={alunoForm.titulacao}
-                  onChange={(e) =>
-                    setAlunoForm((f) => ({ ...f, titulacao: e.target.value }))
-                  }
-                />
-              </div>
-              <div className="flex justify-end gap-2 pt-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => setShowAlunoModal(false)}
-                >
-                  Cancelar
-                </Button>
-                <Button type="submit" disabled={salvandoAluno}>
-                  {salvandoAluno ? 'Salvando...' : 'Salvar Aluno'}
-                </Button>
-              </div>
-            </form>
-          </div>
         </div>
       )}
 

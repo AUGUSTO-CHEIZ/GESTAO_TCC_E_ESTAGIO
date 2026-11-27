@@ -9,6 +9,7 @@ import { useToast } from '@/components/ui/use-toast';
 import {
   Calendar,
   Plus,
+  Minus,
   Trash2,
   ChevronLeft,
   ChevronRight,
@@ -36,7 +37,7 @@ export default function AdminHorarios() {
   const [excluindoDia, setExcluindoDia] = useState(false);
 
   const [configId, setConfigId] = useState(null);
-  const [maxBancasPorHorario, setMaxBancasPorHorario] = useState(2);
+  const [maxBancasPadrao, setMaxBancasPadrao] = useState(2);
   const [salvandoLimite, setSalvandoLimite] = useState(false);
 
   const [mesRef, setMesRef] = useState(() => new Date());
@@ -57,7 +58,9 @@ export default function AdminHorarios() {
       if (cfg) {
         setConfigId(cfg.id);
         if (cfg.max_bancas_por_horario && Number(cfg.max_bancas_por_horario) >= 1) {
-          setMaxBancasPorHorario(Number(cfg.max_bancas_por_horario));
+          setMaxBancasPadrao(Number(cfg.max_bancas_por_horario));
+        } else {
+          setMaxBancasPadrao(2);
         }
       }
     } catch (e) {
@@ -73,10 +76,18 @@ export default function AdminHorarios() {
     carregar();
   }, []);
 
-  async function handleSalvarLimite(e) {
+  // Retorna o limite efetivo de uma faixa (individual se ajustada, senão o padrão de 2)
+  function obterLimiteHorario(horario) {
+    if (horario?.max_bancas !== null && horario?.max_bancas !== undefined && Number(horario.max_bancas) >= 1) {
+      return Number(horario.max_bancas);
+    }
+    return maxBancasPadrao;
+  }
+
+  async function handleSalvarLimitePadrao(e) {
     e.preventDefault();
-    const valor = Math.max(1, Math.min(20, parseInt(maxBancasPorHorario, 10) || 2));
-    setMaxBancasPorHorario(valor);
+    const valor = Math.max(1, Math.min(20, parseInt(maxBancasPadrao, 10) || 2));
+    setMaxBancasPadrao(valor);
     setSalvandoLimite(true);
 
     try {
@@ -102,22 +113,83 @@ export default function AdminHorarios() {
       await registrarLog({
         acao: 'EDITOU',
         entidade: 'HORÁRIOS',
-        detalhes: `Alterou limite de apresentações simultâneas por horário para ${valor}.`,
+        detalhes: `Alterou o padrão de vagas simultâneas por horário para ${valor}.`,
       });
 
       toast({
-        title: 'Limite atualizado!',
-        description: `Agora cada faixa aceita até ${valor} apresentação(ões) simultânea(s).`,
+        title: 'Padrão atualizado!',
+        description: `As faixas sem ajuste individual agora usam ${valor} vaga(s) por horário.`,
       });
     } catch (err) {
       toast({
-        title: 'Erro ao salvar limite',
+        title: 'Erro ao salvar padrão',
         description: err.message,
         variant: 'destructive',
       });
     } finally {
       setSalvandoLimite(false);
     }
+  }
+
+  // Ajusta +1 ou -1 vaga em um horário específico
+  async function alterarVagasHorario(horario, delta) {
+    const limiteAtual = obterLimiteHorario(horario);
+    const ocupadas = bancasDoHorario(horario.id).length;
+    const minimoPermitido = Math.max(1, ocupadas);
+    const novoLimite = Math.max(minimoPermitido, Math.min(20, limiteAtual + delta));
+
+    if (novoLimite === limiteAtual) {
+      if (delta < 0 && ocupadas >= limiteAtual) {
+        toast({
+          title: 'Não é possível reduzir',
+          description: `Já existem ${ocupadas} banca(s) agendada(s) neste horário.`,
+          variant: 'destructive',
+        });
+      }
+      return;
+    }
+
+    // Se voltar ao valor padrão (ex.: 2), salva null para acompanhar o padrão global
+    const valorBanco = novoLimite === maxBancasPadrao ? null : novoLimite;
+    const backup = [...horarios];
+
+    setHorarios((prev) =>
+      prev.map((item) =>
+        item.id === horario.id ? { ...item, max_bancas: valorBanco } : item
+      )
+    );
+
+    const { error } = await supabase
+      .from('horarios')
+      .update({ max_bancas: valorBanco })
+      .eq('id', horario.id);
+
+    if (error) {
+      setHorarios(backup);
+      toast({
+        title: 'Erro ao atualizar vagas do horário',
+        description: error.message,
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    registrarLog({
+      acao: 'EDITOU',
+      entidade: 'HORÁRIOS',
+      detalhes: `Ajustou vagas da faixa ${horario.hora_inicio?.slice(0, 5)}–${horario.hora_fim?.slice(
+        0,
+        5
+      )} (${formatarDataBR(horario.data)}) para ${novoLimite} vaga(s).`,
+    });
+
+    toast({
+      title: 'Vagas do horário atualizadas',
+      description: `${horario.hora_inicio?.slice(0, 5)} – ${horario.hora_fim?.slice(
+        0,
+        5
+      )} agora aceita ${novoLimite} apresentação(ões).`,
+    });
   }
 
   async function handleGerar(e) {
@@ -129,7 +201,7 @@ export default function AdminHorarios() {
         dataInicio,
         dataFim,
         pularFimDeSemana: pularFds,
-        maxBancas: maxBancasPorHorario,
+        maxBancas: maxBancasPadrao,
       });
 
       await registrarLog({
@@ -142,7 +214,7 @@ export default function AdminHorarios() {
 
       toast({
         title: 'Horários gerados',
-        description: `${criados} faixa(s) de 2h criada(s).`,
+        description: `${criados} faixa(s) de 2h criada(s) com ${maxBancasPadrao} vagas cada.`,
       });
       if (!diaFoco) {
         setDiaFoco(dataInicio);
@@ -157,7 +229,6 @@ export default function AdminHorarios() {
 
   async function removerHorario(horario) {
     const backup = [...horarios];
-    // Remoção imediata na tela (otimista)
     setHorarios((prev) => prev.filter((h) => h.id !== horario.id));
 
     const { error } = await supabase.from('horarios').delete().eq('id', horario.id);
@@ -213,7 +284,6 @@ export default function AdminHorarios() {
     const backup = [...horarios];
 
     setExcluindoDia(true);
-    // Remoção imediata na tela
     setHorarios((prev) => prev.filter((h) => !idsParaExcluir.includes(h.id)));
 
     try {
@@ -273,25 +343,25 @@ export default function AdminHorarios() {
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Horários</h1>
           <p className="text-sm text-slate-500">
-            Gere faixas de 2h por dia/período e ajuste quantas bancas podem ocorrer ao mesmo tempo.
+            Padrão de {maxBancasPadrao} vaga(s) por horário, com ajuste individual em cada faixa da agenda.
           </p>
         </div>
 
-        {/* Controle de Apresentações Simultâneas */}
+        {/* Padrão Global de Apresentações Simultâneas */}
         <form
-          onSubmit={handleSalvarLimite}
+          onSubmit={handleSalvarLimitePadrao}
           className="bg-white px-4 py-2.5 rounded-xl border border-slate-200 flex flex-wrap items-center gap-3"
         >
           <div className="flex items-center gap-2 text-xs font-medium text-slate-700">
             <SlidersHorizontal className="w-4 h-4 text-indigo-600" />
-            <span>Bancas simultâneas por horário:</span>
+            <span>Padrão de vagas por horário:</span>
           </div>
           <Input
             type="number"
             min={1}
             max={20}
-            value={maxBancasPorHorario}
-            onChange={(e) => setMaxBancasPorHorario(e.target.value)}
+            value={maxBancasPadrao}
+            onChange={(e) => setMaxBancasPadrao(e.target.value)}
             className="w-20 h-8 text-center font-semibold"
           />
           <Button
@@ -466,32 +536,69 @@ export default function AdminHorarios() {
             <div className="space-y-3 max-h-[520px] overflow-y-auto pr-1">
               {slotsDiaSelecionado.map((h) => {
                 const lista = bancasDoHorario(h.id);
-                const lotado = lista.length >= maxBancasPorHorario;
+                const limiteSlot = obterLimiteHorario(h);
+                const lotado = lista.length >= limiteSlot;
+                const personalizado = limiteSlot !== maxBancasPadrao;
 
                 return (
                   <div
                     key={h.id}
-                    className="p-3 rounded-lg border border-slate-200 bg-slate-50 space-y-2"
+                    className={`p-3 rounded-lg border space-y-2 transition ${
+                      personalizado
+                        ? 'border-indigo-300 bg-indigo-50/40'
+                        : 'border-slate-200 bg-slate-50'
+                    }`}
                   >
-                    <div className="flex items-center justify-between">
-                      <span
-                        className={`text-xs font-bold ${
-                          lotado ? 'text-rose-600' : 'text-indigo-700'
-                        }`}
-                      >
-                        {h.hora_inicio?.slice(0, 5)} – {h.hora_fim?.slice(0, 5)} ({lista.length}/
-                        {maxBancasPorHorario} vagas)
-                      </span>
-                      {lista.length === 0 && (
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span
+                          className={`text-xs font-bold ${
+                            lotado ? 'text-rose-600' : 'text-indigo-700'
+                          }`}
+                        >
+                          {h.hora_inicio?.slice(0, 5)} – {h.hora_fim?.slice(0, 5)} ({lista.length}/
+                          {limiteSlot} vagas)
+                        </span>
+                        {personalizado && (
+                          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700">
+                            {limiteSlot > maxBancasPadrao
+                              ? `+${limiteSlot - maxBancasPadrao} extra`
+                              : 'Ajustado'}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Controle individual de vagas + exclusão */}
+                      <div className="flex items-center gap-1">
                         <button
                           type="button"
-                          onClick={() => removerHorario(h)}
-                          title="Excluir esta faixa"
-                          className="p-1 text-slate-400 hover:text-red-600 rounded hover:bg-red-50 transition"
+                          onClick={() => alterarVagasHorario(h, -1)}
+                          disabled={limiteSlot <= Math.max(1, lista.length)}
+                          title="Diminuir 1 vaga neste horário"
+                          className="w-6 h-6 rounded border border-slate-200 bg-white text-slate-600 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center transition"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
+                          <Minus className="w-3 h-3" />
                         </button>
-                      )}
+                        <button
+                          type="button"
+                          onClick={() => alterarVagasHorario(h, 1)}
+                          title="Liberar +1 vaga neste horário"
+                          className="w-6 h-6 rounded border border-indigo-200 bg-white text-indigo-600 hover:bg-indigo-50 flex items-center justify-center transition"
+                        >
+                          <Plus className="w-3 h-3" />
+                        </button>
+
+                        {lista.length === 0 && (
+                          <button
+                            type="button"
+                            onClick={() => removerHorario(h)}
+                            title="Excluir esta faixa"
+                            className="p-1 ml-1 text-slate-400 hover:text-red-600 rounded hover:bg-red-50 transition"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
                     </div>
 
                     {lista.map((b) => (

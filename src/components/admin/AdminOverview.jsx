@@ -239,7 +239,7 @@ export default function AdminOverview() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-3">
-          <h1 className="text-2xl font-bold text-slate-900">Painel Geral</h1>
+          <h1 className="text-2xl font-bold text-slate-900">Bancas</h1>
           {semestreAtivo && (
             <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-indigo-100 text-indigo-700">
               Semestre {semestreAtivo}

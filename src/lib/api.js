@@ -358,8 +358,11 @@ export async function listarAgendaPublica() {
     const horariosComContagem = horarios.map((h) => {
       const bancasDoHorario = bancasComVagas.filter((b) => b.horario_id === h.id);
       const count = bancasDoHorario.length;
-      const limiteSlot =
-        h.max_bancas !== null && h.max_bancas !== undefined
+      const limiteSlot = horario.max_bancas ?? maxBancas;
+        if (bancasNoHorario && bancasNoHorario.length >= limiteSlot) {
+        return { data: { error: `Máximo de ${limiteSlot} apresentações por horário atingido` } };
+        }
+          h.max_bancas !== null && h.max_bancas !== undefined
           ? Number(h.max_bancas)
           : maxBancasPadrao;
 
@@ -369,8 +372,8 @@ export async function listarAgendaPublica() {
         hora_inicio: h.hora_inicio,
         hora_fim: h.hora_fim,
         descricao: h.descricao,
-        max_bancas: limiteSlot,
-        bancas_count: count,
+        max_bancas: h.max_bancas ?? null,
+        bancas_count: bancasComVagas.filter((b) => b.horario_id === h.id).length,
         vagas_apresentacao: Math.max(0, limiteSlot - count),
         disponivel: limiteSlot > 0 && count < limiteSlot,
         salas_ocupadas: bancasDoHorario.map((b) => b.sala_id).filter(Boolean),
@@ -594,6 +597,10 @@ export async function criarInscricao(body) {
 export async function criarInscricaoEspectador(body) {
   try {
     const tipo = body?.tipo || 'academico';
+    const prazoEsp = await verificarPrazoEspectador(tipo);
+    if (!prazoEsp.permitido) {
+      return { data: { error: prazoEsp.motivo } };
+    }
     const nome = String(body?.nome || '').trim();
     const emailRaw = String(body?.email || '').trim();
     const senha = String(body?.senha || body?.password || '').trim();
@@ -745,34 +752,6 @@ export async function criarInscricaoEspectador(body) {
         total: registros.length,
         inscricoes: inseridas || registros,
         email_confirmacao: confirmacaoEmail,
-      },
-    };
-  } catch (error) {
-    return { data: { error: error.message } };
-  }
-}
-
-// 11. Verificar Prazo de Inscrição do Apresentador (TCCs)
-export async function verificarPrazoApresentador() {
-  try {
-    const { data: eventos, error } = await supabase
-      .from('configuracao_evento')
-      .select('*')
-      .limit(1);
-
-    if (error) throw error;
-
-    const evento = eventos?.[0] || null;
-    const check = avaliarPeriodoPorCategoria(evento, 'tcc', new Date());
-
-    return {
-      data: {
-        aberto: check.liberado,
-        permitido: check.liberado,
-        dentro_do_prazo: check.liberado,
-        motivo: check.motivo,
-        mensagem: check.motivo,
-        evento,
       },
     };
   } catch (error) {
@@ -1339,6 +1318,64 @@ export async function atualizarProfessoresBanca(body) {
   }
 }
 
+// 11. Verificar Prazo de Inscrição do Apresentador (TCCs)
+export async function verificarPrazoEspectador(tipo = 'academico') {
+  const { data: eventos, error } = await supabase
+    .from('configuracao_evento')
+    .select('*')
+    .limit(1);
+
+  if (error) return { permitido: true };
+  const ev = eventos?.[0];
+  if (!ev) return { permitido: true };
+
+  if (ev.inscricoes_abertas === false) {
+    return {
+      permitido: false,
+      motivo: 'As inscrições estão temporariamente encerradas pela coordenação.',
+    };
+  }
+
+  const isFamiliar = tipo === 'familiar';
+  const aberturaRaw = isFamiliar
+    ? ev.inscricao_espectador_familiar_abertura
+    : ev.inscricao_espectador_aluno_abertura;
+  const fechamentoRaw = isFamiliar
+    ? ev.inscricao_espectador_familiar_fechamento
+    : ev.inscricao_espectador_aluno_fechamento;
+
+  const labelGrupo = isFamiliar ? 'Familiares e Amigos' : 'Alunos (Acadêmicos)';
+  const agora = new Date();
+
+  if (aberturaRaw) {
+    const dtInicio = new Date(aberturaRaw);
+    if (!Number.isNaN(dtInicio.getTime()) && agora < dtInicio) {
+      return {
+        permitido: false,
+        motivo: `As inscrições de espectadores para ${labelGrupo} abrem em ${dtInicio.toLocaleString(
+          'pt-BR',
+          { dateStyle: 'short', timeStyle: 'short' }
+        )}.`,
+      };
+    }
+  }
+
+  if (fechamentoRaw) {
+    const dtFim = new Date(fechamentoRaw);
+    if (!Number.isNaN(dtFim.getTime()) && agora > dtFim) {
+      return {
+        permitido: false,
+        motivo: `O prazo de inscrição de espectadores para ${labelGrupo} encerrou em ${dtFim.toLocaleString(
+          'pt-BR',
+          { dateStyle: 'short', timeStyle: 'short' }
+        )}.`,
+      };
+    }
+  }
+
+  return { permitido: true };
+}
+
 // 12. Obter semestre (ex: "2026/1" ou "2026/2") a partir de uma data
 export function obterSemestrePorData(dataInput) {
   const raw = String(dataInput || '').trim();
@@ -1365,38 +1402,157 @@ export function obterSemestrePorData(dataInput) {
 
   return `${year}/${month <= 6 ? 1 : 2}`;
 }
-
-// 13. Arquivar semestre atual no histórico
-export async function arquivarSemestreAtual(params = {}) {
+// Arquivar snapshot completo do semestre atual e resetar dados operacionais
+export async function arquivarSemestreAtual({
+  semestreCodigo,
+  periodoDescricao = '',
+  novoSemestreCodigo,
+  automatico = true,
+}) {
   try {
-    const semestre =
-      typeof params === 'string'
-        ? params
-        : params.semestre || obterSemestrePorData(new Date());
-
-    const [bancasRes, inscricoesRes, horariosRes] = await Promise.all([
-      supabase.from('bancas').select('*'),
+    const [bancasRes, inscricoesRes, ausentesRes, presencasRes] = await Promise.all([
+      supabase.from('bancas').select('*').order('horario_data', { ascending: true }),
       supabase.from('inscricoes').select('*'),
-      supabase.from('horarios').select('*'),
+      supabase.from('inscricoes_ausentes').select('*'),
+      supabase.from('presencas').select('*'),
     ]);
+
+    if (bancasRes.error) throw bancasRes.error;
 
     const bancas = bancasRes.data || [];
     const inscricoes = inscricoesRes.data || [];
-    const horarios = horariosRes.data || [];
+    const ausentesTabela = ausentesRes.data || [];
+    const presencas = presencasRes.data || [];
 
-    const { error } = await supabase.from('historico_semestres').insert({
-      semestre,
-      dados_bancas: bancas,
-      dados_inscricoes: inscricoes,
-      dados_horarios: horarios,
-      total_bancas: bancas.length,
-      total_inscricoes: inscricoes.length,
-      arquivado_em: new Date().toISOString(),
+    const presencaMap = new Set(
+      presencas.filter((p) => p.presente).map((p) => p.inscricao_id)
+    );
+
+    let totalPresentes = 0;
+    let totalAusentes = 0;
+
+    const dadosBancas = bancas.map((b) => {
+      const inscsBanca = inscricoes.filter(
+        (i) => i.banca_id === b.id && i.tipo !== 'apresentador'
+      );
+
+      const presentes = inscsBanca
+        .filter(
+          (i) =>
+            i.presente ||
+            i.presente_chamada1 ||
+            i.presente_chamada2 ||
+            presencaMap.has(i.id)
+        )
+        .map((i) => ({
+          nome: i.nome,
+          tipo: i.tipo,
+          codigo_academico: i.codigo_academico || '',
+          email: i.email || '',
+          curso: i.curso || '',
+          semestre: i.semestre || '',
+          parentesco: i.parentesco || '',
+          inclusao_ultima_hora: Boolean(i.inclusao_ultima_hora),
+        }));
+
+      const ausentesNaoConfirmados = inscsBanca
+        .filter(
+          (i) =>
+            !i.presente &&
+            !i.presente_chamada1 &&
+            !i.presente_chamada2 &&
+            !presencaMap.has(i.id)
+        )
+        .map((i) => ({
+          nome: i.nome,
+          tipo: i.tipo,
+          codigo_academico: i.codigo_academico || '',
+          email: i.email || '',
+          etapa_falta: 'Não compareceu',
+        }));
+
+      const ausentesChamada1 = ausentesTabela
+        .filter((a) => a.banca_id === b.id)
+        .map((a) => ({
+          nome: a.nome,
+          tipo: a.tipo,
+          codigo_academico: a.codigo_academico || '',
+          email: a.email || '',
+          etapa_falta: a.etapa_falta || '1ª Chamada',
+        }));
+
+      const ausentesUnicos = Array.from(
+        new Map(
+          [...ausentesChamada1, ...ausentesNaoConfirmados].map((item) => [
+            `${item.nome.toLowerCase()}|${item.email.toLowerCase()}|${item.codigo_academico}`,
+            item,
+          ])
+        ).values()
+      );
+
+      totalPresentes += presentes.length;
+      totalAusentes += ausentesUnicos.length;
+
+      return {
+        banca_id: b.id,
+        apresentador_nome: b.apresentador_nome || '',
+        apresentador_codigo: b.apresentador_codigo || '',
+        apresentador_email: b.apresentador_email || '',
+        titulo_tcc: b.titulo_tcc || '',
+        horario_descricao: b.horario_descricao || '',
+        horario_data: b.horario_data || '',
+        sala_nome: b.sala_nome || '',
+        status: b.status || '',
+        orientador_nome: b.orientador_nome || '',
+        avaliador1_nome: b.avaliador1_nome || '',
+        avaliador2_nome: b.avaliador2_nome || '',
+        avaliador2_tipo: b.avaliador2_tipo || 'curso',
+        presentes,
+        ausentes: ausentesUnicos,
+      };
     });
 
-    if (error) throw error;
+    if (dadosBancas.length > 0 || inscricoes.length > 0 || ausentesTabela.length > 0) {
+      const { error: arqErr } = await supabase.from('semestres_arquivados').insert({
+        semestre_codigo: semestreCodigo,
+        periodo_descricao: periodoDescricao,
+        total_bancas: dadosBancas.length,
+        total_presentes: totalPresentes,
+        total_ausentes: totalAusentes,
+        dados_bancas: dadosBancas,
+        arquivado_automaticamente: automatico,
+      });
+      if (arqErr) throw arqErr;
+    }
 
-    return { data: { success: true, semestre } };
+    const filtroTodos = '00000000-0000-0000-0000-000000000000';
+    await supabase.from('presencas').delete().neq('id', filtroTodos);
+    await supabase.from('inscricoes_ausentes').delete().neq('id', filtroTodos);
+    await supabase.from('inscricoes').delete().neq('id', filtroTodos);
+    await supabase.from('bancas').delete().neq('id', filtroTodos);
+    await supabase.from('horarios').delete().neq('id', filtroTodos);
+    await supabase.from('alunos_precadastro').delete().neq('id', filtroTodos);
+
+    const { data: configs } = await supabase.from('configuracao_evento').select('id').limit(1);
+    if (configs && configs.length > 0) {
+      await supabase
+        .from('configuracao_evento')
+        .update({ semestre_atual: novoSemestreCodigo })
+        .eq('id', configs[0].id);
+    } else {
+      await supabase
+        .from('configuracao_evento')
+        .insert({ nome_evento: 'Bancas de TCC - Psicologia Unesc', semestre_atual: novoSemestreCodigo });
+    }
+
+    return {
+      data: {
+        success: true,
+        arquivado: semestreCodigo,
+        novo_semestre: novoSemestreCodigo,
+        total_bancas: dadosBancas.length,
+      },
+    };
   } catch (error) {
     return { data: { error: error.message } };
   }
@@ -1483,6 +1639,76 @@ export async function verificarPrimeiroAcessoProfessor(params) {
         primeiroAcesso,
         ja_cadastrado: !primeiroAcesso,
         professor,
+      },
+    };
+  } catch (error) {
+    return { data: { error: error.message } };
+  }
+}
+
+// Verificar Prazo de Inscrição do Apresentador
+export async function verificarPrazoApresentador() {
+  try {
+    const { data: eventos, error } = await supabase
+      .from('configuracao_evento')
+      .select('*')
+      .limit(1);
+
+    if (error) throw error;
+
+    const evento = eventos?.[0] || null;
+    if (!evento) {
+      return {
+        data: {
+          aberto: true,
+          permitido: true,
+          dentro_do_prazo: true,
+          evento: null,
+        },
+      };
+    }
+
+    const agora = new Date();
+    const inicioRaw =
+      evento.data_inicio_apresentador || evento.inicio_inscricao_apresentador || null;
+    const fimRaw =
+      evento.prazo_apresentador ||
+      evento.data_limite_apresentador ||
+      evento.data_fim_apresentador ||
+      evento.prazo_inscricao_apresentador ||
+      null;
+
+    let dentroDoPrazo = evento.inscricoes_abertas !== false;
+    let motivo = '';
+
+    if (!dentroDoPrazo) {
+      motivo = 'As inscrições estão encerradas no momento.';
+    }
+
+    if (dentroDoPrazo && inicioRaw) {
+      const dtInicio = new Date(inicioRaw);
+      if (!Number.isNaN(dtInicio.getTime()) && agora < dtInicio) {
+        dentroDoPrazo = false;
+        motivo = 'O período de inscrição para apresentadores ainda não iniciou.';
+      }
+    }
+
+    if (dentroDoPrazo && fimRaw) {
+      const dtFim = new Date(fimRaw);
+      if (!Number.isNaN(dtFim.getTime()) && agora > dtFim) {
+        dentroDoPrazo = false;
+        motivo = 'O prazo de inscrição para apresentadores já foi encerrado.';
+      }
+    }
+
+    return {
+      data: {
+        aberto: dentroDoPrazo,
+        permitido: dentroDoPrazo,
+        dentro_do_prazo: dentroDoPrazo,
+        motivo,
+        mensagem: motivo,
+        evento,
       },
     };
   } catch (error) {
